@@ -18,9 +18,9 @@ The goal is simple:
 - [2. What “stabilization” means here](#2-what-stabilization-means-here)
 - [3. Core pipeline overview](#3-core-pipeline-overview)
 - [4. Concepts primer](#4-concepts-primer)
-  - [4.1 Optical flow (Lucas–Kanade) in plain language](#41-optical-flow-lucas–kanade-in-plain-language)
+  - [4.1 Optical flow (Lucas–Kanade) introduction](#41-optical-flow-lucas–kanade-in-plain-language)
   - [4.2 Robust motion via RANSAC](#42-robust-motion-via-ransac)
-  - [4.3 Kalman filtering in plain language](#43-kalman-filtering-in-plain-language)
+  - [4.3 Kalman filtering introduction](#43-kalman-filtering-in-plain-language)
   - [4.4 Controller: turning drift into roll/pitch](#44-controller-turning-drift-into-rollpitch)
 - [5. Software architecture](#5-software-architecture)
 - [6. Configuration reference (all parameters)](#6-configuration-reference-all-parameters)
@@ -110,7 +110,7 @@ At a high level, every control step does:
 
 ## 4. Concepts primer
 
-### 4.1 Optical flow (Lucas–Kanade) in plain language
+### 4.1 Optical flow (Lucas–Kanade) introduction
 
 **Optical flow** measures how pixels move from one frame to the next.
 
@@ -153,7 +153,7 @@ Here we use:
 
 and extract only the translation component as `(dx, dy)`.
 
-### 4.3 Kalman filtering in plain language
+### 4.3 Kalman filtering introduction
 
 Even with RANSAC, `vx/vy` from optical flow is noisy.
 
