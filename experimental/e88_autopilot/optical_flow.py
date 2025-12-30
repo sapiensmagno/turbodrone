@@ -20,6 +20,13 @@ class FlowEstimate:
     n_tracked: int
 
 
+@dataclass(frozen=True)
+class FlowTracks:
+    prev_xy: np.ndarray  # shape (N, 2)
+    next_xy: np.ndarray  # shape (N, 2)
+    inliers: np.ndarray  # shape (N,)
+
+
 class LucasKanadeDriftEstimator:
     def __init__(
         self,
@@ -33,6 +40,8 @@ class LucasKanadeDriftEstimator:
         min_tracked_features: int = 40,
         reinit_every_n_frames: int = 60,
         downscale: float = 0.5,
+        max_translation_frac: float = 0.25,
+        min_inlier_ratio: float = 0.6,
     ) -> None:
         self._feature_params = dict(
             maxCorners=int(max_corners),
@@ -49,17 +58,28 @@ class LucasKanadeDriftEstimator:
         self._min_tracked_features = int(min_tracked_features)
         self._reinit_every_n_frames = int(reinit_every_n_frames)
         self._downscale = float(downscale)
+        self._max_translation_frac = float(max_translation_frac)
+        self._min_inlier_ratio = float(min_inlier_ratio)
 
         self._prev_gray: Optional[np.ndarray] = None
         self._prev_pts: Optional[np.ndarray] = None
         self._prev_ts: Optional[float] = None
         self._frames_since_init = 0
 
+        self._last_tracks: Optional[FlowTracks] = None
+
     def reset(self) -> None:
         self._prev_gray = None
         self._prev_pts = None
         self._prev_ts = None
         self._frames_since_init = 0
+        self._last_tracks = None
+
+    def last_tracks(self) -> Optional[FlowTracks]:
+        t = self._last_tracks
+        if t is None:
+            return None
+        return FlowTracks(prev_xy=t.prev_xy.copy(), next_xy=t.next_xy.copy(), inliers=t.inliers.copy())
 
     def update(self, frame_bgr: np.ndarray, timestamp: Optional[float] = None) -> Optional[FlowEstimate]:
         ts = float(time.monotonic() if timestamp is None else timestamp)
@@ -71,6 +91,7 @@ class LucasKanadeDriftEstimator:
         if self._prev_gray is None or self._prev_pts is None or self._prev_ts is None:
             self._initialize(gray)
             self._prev_ts = ts
+            self._last_tracks = None
             return None
 
         dt = ts - self._prev_ts
@@ -81,6 +102,7 @@ class LucasKanadeDriftEstimator:
         if next_pts is None or status is None:
             self._initialize(gray)
             self._prev_ts = ts
+            self._last_tracks = None
             return None
 
         good = status.reshape(-1) == 1
@@ -93,6 +115,10 @@ class LucasKanadeDriftEstimator:
         dx_px = 0.0
         dy_px = 0.0
 
+        inliers = np.ones((n_tracked,), dtype=np.bool_)
+
+        inlier_ratio = 1.0
+
         if n_tracked >= 4:
             m, inliers = cv2.estimateAffinePartial2D(prev_good, next_good, method=cv2.RANSAC, ransacReprojThreshold=3.0)
             if m is not None:
@@ -102,16 +128,39 @@ class LucasKanadeDriftEstimator:
                 flow = (next_good - prev_good).reshape(-1, 2)
                 dx_px = float(np.median(flow[:, 0]))
                 dy_px = float(np.median(flow[:, 1]))
+                inliers = np.ones((n_tracked,), dtype=np.bool_)
         elif n_tracked > 0:
             flow = (next_good - prev_good).reshape(-1, 2)
             dx_px = float(np.median(flow[:, 0]))
             dy_px = float(np.median(flow[:, 1]))
+            inliers = np.ones((n_tracked,), dtype=np.bool_)
+
+        if inliers is None:
+            inliers = np.ones((n_tracked,), dtype=np.bool_)
+        else:
+            inliers = inliers.reshape(-1).astype(np.bool_)
+
+        if n_tracked > 0:
+            inlier_ratio = float(np.count_nonzero(inliers)) / float(n_tracked)
+
+        max_frac = max(0.01, float(self._max_translation_frac))
+        max_step_px = max_frac * float(min(gray.shape[0], gray.shape[1]))
+        if abs(dx_px) > max_step_px or abs(dy_px) > max_step_px or inlier_ratio < float(self._min_inlier_ratio):
+            self._initialize(gray)
+            self._prev_ts = ts
+            self._last_tracks = None
+            return None
+
+        scale = (1.0 / self._downscale) if self._downscale != 0.0 else 1.0
+        prev_xy = prev_good.reshape(-1, 2).astype(np.float32) * scale
+        next_xy = next_good.reshape(-1, 2).astype(np.float32) * scale
+        self._last_tracks = FlowTracks(prev_xy=prev_xy, next_xy=next_xy, inliers=inliers)
 
         vx = dx_px / dt
         vy = dy_px / dt
 
         tracked_ratio = (n_tracked / max(1, n_features))
-        quality = float(max(0.0, min(1.0, tracked_ratio)))
+        quality = float(max(0.0, min(1.0, tracked_ratio * inlier_ratio)))
 
         self._prev_gray = gray
         self._prev_pts = next_good.reshape(-1, 1, 2)
