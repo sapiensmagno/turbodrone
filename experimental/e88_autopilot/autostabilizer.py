@@ -3,11 +3,14 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
+
+import numpy as np
 
 from e88_autopilot.controller import VelocityHoldController
 from e88_autopilot.kalman import VelocityKalman2D
-from e88_autopilot.optical_flow import LucasKanadeDriftEstimator
+from e88_autopilot.kalman import KalmanEstimate
+from e88_autopilot.optical_flow import FlowEstimate, FlowTracks, LucasKanadeDriftEstimator
 from turbodrone import Drone
 
 
@@ -39,10 +42,34 @@ class StabilizerConfig:
     pitch_sign: float = -1.0
 
 
+@dataclass(frozen=True)
+class StabilizerTelemetry:
+    phase: str
+    frame_bgr: Optional[np.ndarray]
+    timestamp: float
+    pos_x_px: float
+    pos_y_px: float
+    flow: Optional[FlowEstimate]
+    tracks: Optional[FlowTracks]
+    kalman: Optional[KalmanEstimate]
+    used_vx_px_s: float
+    used_vy_px_s: float
+    cmd_roll: float
+    cmd_pitch: float
+    cmd_throttle: float
+
+
 class AutoStabilizer:
-    def __init__(self, drone: Drone, *, cfg: Optional[StabilizerConfig] = None) -> None:
+    def __init__(
+        self,
+        drone: Drone,
+        *,
+        cfg: Optional[StabilizerConfig] = None,
+        telemetry_sink: Optional[Callable[[StabilizerTelemetry], None]] = None,
+    ) -> None:
         self._drone = drone
         self._cfg = cfg or StabilizerConfig()
+        self._telemetry_sink = telemetry_sink
 
         self._flow = LucasKanadeDriftEstimator()
         self._kf = None
@@ -65,6 +92,9 @@ class AutoStabilizer:
         self._last_loop_t: Optional[float] = None
         self._stop = threading.Event()
 
+        self._viz_x_px = 0.0
+        self._viz_y_px = 0.0
+
     def activate(self) -> None:
         self._flow.reset()
         if self._kf is not None:
@@ -73,12 +103,26 @@ class AutoStabilizer:
         self._last_loop_t = None
         self._active = True
         self._stop.clear()
+        self._viz_x_px = 0.0
+        self._viz_y_px = 0.0
 
     def deactivate(self) -> None:
         self._active = False
 
     def request_stop(self) -> None:
         self._stop.set()
+
+    def set_telemetry_sink(self, sink: Optional[Callable[[StabilizerTelemetry], None]]) -> None:
+        self._telemetry_sink = sink
+
+    def _emit(self, t: StabilizerTelemetry) -> None:
+        sink = self._telemetry_sink
+        if sink is None:
+            return
+        try:
+            sink(t)
+        except Exception:
+            pass
 
     def run(self, *, duration_sec: Optional[float] = None) -> None:
         if not self._active:
@@ -91,11 +135,45 @@ class AutoStabilizer:
             while not self._stop.is_set() and (time.monotonic() - t0) < self._cfg.takeoff_duration_sec:
                 self._drone.takeoff()
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.takeoff_throttle)
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="takeoff",
+                        frame_bgr=None,
+                        timestamp=float(time.monotonic()),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=None,
+                        tracks=None,
+                        kalman=None,
+                        used_vx_px_s=0.0,
+                        used_vy_px_s=0.0,
+                        cmd_roll=0.0,
+                        cmd_pitch=0.0,
+                        cmd_throttle=float(self._cfg.takeoff_throttle),
+                    )
+                )
                 time.sleep(0.05)
 
             t1 = time.monotonic()
             while not self._stop.is_set() and (time.monotonic() - t1) < self._cfg.climb_duration_sec:
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.climb_throttle)
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="climb",
+                        frame_bgr=None,
+                        timestamp=float(time.monotonic()),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=None,
+                        tracks=None,
+                        kalman=None,
+                        used_vx_px_s=0.0,
+                        used_vy_px_s=0.0,
+                        cmd_roll=0.0,
+                        cmd_pitch=0.0,
+                        cmd_throttle=float(self._cfg.climb_throttle),
+                    )
+                )
                 time.sleep(0.05)
 
             good_needed = max(0, int(self._cfg.settle_good_frames))
@@ -104,12 +182,46 @@ class AutoStabilizer:
                 item = self._drone.get_frame_with_timestamp(timeout=2.0)
                 if item is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.climb_throttle)
+                    self._emit(
+                        StabilizerTelemetry(
+                            phase="settle",
+                            frame_bgr=None,
+                            timestamp=float(time.monotonic()),
+                            pos_x_px=float(self._viz_x_px),
+                            pos_y_px=float(self._viz_y_px),
+                            flow=None,
+                            tracks=None,
+                            kalman=None,
+                            used_vx_px_s=0.0,
+                            used_vy_px_s=0.0,
+                            cmd_roll=0.0,
+                            cmd_pitch=0.0,
+                            cmd_throttle=float(self._cfg.climb_throttle),
+                        )
+                    )
                     continue
 
                 frame, ts = item
                 est = self._flow.update(frame, timestamp=ts)
                 if est is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.climb_throttle)
+                    self._emit(
+                        StabilizerTelemetry(
+                            phase="settle",
+                            frame_bgr=frame,
+                            timestamp=float(ts),
+                            pos_x_px=float(self._viz_x_px),
+                            pos_y_px=float(self._viz_y_px),
+                            flow=None,
+                            tracks=self._flow.last_tracks(),
+                            kalman=None,
+                            used_vx_px_s=0.0,
+                            used_vy_px_s=0.0,
+                            cmd_roll=0.0,
+                            cmd_pitch=0.0,
+                            cmd_throttle=float(self._cfg.climb_throttle),
+                        )
+                    )
                     continue
 
                 if est.quality >= self._cfg.min_quality:
@@ -118,6 +230,27 @@ class AutoStabilizer:
                     good_seen = 0
 
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.climb_throttle)
+
+                self._viz_x_px += float(est.vx_px_s) * float(est.dt_sec)
+                self._viz_y_px += float(est.vy_px_s) * float(est.dt_sec)
+
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="settle",
+                        frame_bgr=frame,
+                        timestamp=float(ts),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=est,
+                        tracks=self._flow.last_tracks(),
+                        kalman=None,
+                        used_vx_px_s=float(est.vx_px_s),
+                        used_vy_px_s=float(est.vy_px_s),
+                        cmd_roll=0.0,
+                        cmd_pitch=0.0,
+                        cmd_throttle=float(self._cfg.climb_throttle),
+                    )
+                )
 
             start = time.monotonic()
 
@@ -133,6 +266,23 @@ class AutoStabilizer:
             item = self._drone.get_frame_with_timestamp(timeout=2.0)
             if item is None:
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="hold",
+                        frame_bgr=None,
+                        timestamp=float(time.monotonic()),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=None,
+                        tracks=None,
+                        kalman=None,
+                        used_vx_px_s=0.0,
+                        used_vy_px_s=0.0,
+                        cmd_roll=0.0,
+                        cmd_pitch=0.0,
+                        cmd_throttle=float(self._cfg.base_throttle),
+                    )
+                )
                 time.sleep(period)
                 continue
 
@@ -141,20 +291,78 @@ class AutoStabilizer:
             est = self._flow.update(frame, timestamp=ts)
             if est is None:
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="hold",
+                        frame_bgr=frame,
+                        timestamp=float(ts),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=None,
+                        tracks=self._flow.last_tracks(),
+                        kalman=None,
+                        used_vx_px_s=0.0,
+                        used_vy_px_s=0.0,
+                        cmd_roll=0.0,
+                        cmd_pitch=0.0,
+                        cmd_throttle=float(self._cfg.base_throttle),
+                    )
+                )
                 time.sleep(period)
                 continue
 
             vx, vy = est.vx_px_s, est.vy_px_s
             q = est.quality
+            k_est = None
             if self._kf is not None:
-                k = self._kf.update_velocity(t=ts, vx_px_s=vx, vy_px_s=vy, quality=q)
-                vx, vy = k.vx_px_s, k.vy_px_s
+                k_est = self._kf.update_velocity(t=ts, vx_px_s=vx, vy_px_s=vy, quality=q)
+                vx, vy = k_est.vx_px_s, k_est.vy_px_s
+                self._viz_x_px = float(k_est.x_px)
+                self._viz_y_px = float(k_est.y_px)
+            else:
+                self._viz_x_px += float(vx) * float(est.dt_sec)
+                self._viz_y_px += float(vy) * float(est.dt_sec)
 
             out = self._ctl.update(dt_sec=est.dt_sec, vx_px_s=vx, vy_px_s=vy, quality=q)
             if out is None:
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="hold",
+                        frame_bgr=frame,
+                        timestamp=float(ts),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=est,
+                        tracks=self._flow.last_tracks(),
+                        kalman=k_est,
+                        used_vx_px_s=float(vx),
+                        used_vy_px_s=float(vy),
+                        cmd_roll=0.0,
+                        cmd_pitch=0.0,
+                        cmd_throttle=float(self._cfg.base_throttle),
+                    )
+                )
             else:
                 self._drone.send_cmd(roll=out.roll, pitch=out.pitch, throttle=self._cfg.base_throttle)
+
+                self._emit(
+                    StabilizerTelemetry(
+                        phase="hold",
+                        frame_bgr=frame,
+                        timestamp=float(ts),
+                        pos_x_px=float(self._viz_x_px),
+                        pos_y_px=float(self._viz_y_px),
+                        flow=est,
+                        tracks=self._flow.last_tracks(),
+                        kalman=k_est,
+                        used_vx_px_s=float(vx),
+                        used_vy_px_s=float(vy),
+                        cmd_roll=float(out.roll),
+                        cmd_pitch=float(out.pitch),
+                        cmd_throttle=float(self._cfg.base_throttle),
+                    )
+                )
 
             elapsed = time.monotonic() - now
             if elapsed < period:

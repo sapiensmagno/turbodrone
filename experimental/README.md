@@ -83,6 +83,12 @@ export QT_QPA_PLATFORM=wayland
 python test_e88pro.py
 ```
 
+Alternatively, you can run the PyQt5 controller (with autostabilizer visualizations):
+
+```bash
+python -m e88_qt.app
+```
+
 ### 6. Controls
 
 - **Z**: Takeoff
