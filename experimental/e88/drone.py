@@ -3,12 +3,12 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
 from .config import E88Config
-from .rc import E88RcPacketBuilder, E88RcState
+from .rc import E88RcPacketBuilder, E88RcState, E88SticksRaw
 from .video import E88VideoStream
 
 
@@ -62,6 +62,9 @@ class E88Drone:
     def get_frame(self, timeout: Optional[float] = None) -> Optional[np.ndarray]:
         return self._video.get_frame(timeout=timeout)
 
+    def get_frame_with_timestamp(self, timeout: Optional[float] = None) -> Optional[Tuple[np.ndarray, float]]:
+        return self._video.get_frame_with_timestamp(timeout=timeout)
+
     def set_sticks_raw(self, *, roll: Optional[int] = None, pitch: Optional[int] = None, throttle: Optional[int] = None, yaw: Optional[int] = None) -> None:
         with self._state_lock:
             if roll is not None:
@@ -72,6 +75,10 @@ class E88Drone:
                 self._state.throttle = int(max(0, min(255, throttle)))
             if yaw is not None:
                 self._state.yaw = int(max(0, min(255, yaw)))
+
+    def set_sticks(self, sticks: E88SticksRaw) -> None:
+        s = sticks.clamped()
+        self.set_sticks_raw(roll=s.left_right, pitch=s.forward_back, throttle=s.throttle, yaw=s.yaw)
 
     def send_cmd(self, *, roll: float = 0.0, pitch: float = 0.0, yaw: float = 0.0, throttle: float = 50.0) -> None:
         self.set_sticks_raw(

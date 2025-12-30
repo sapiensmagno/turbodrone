@@ -3,6 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
+class E88SticksRaw:
+    left_right: int = 128
+    forward_back: int = 128
+    throttle: int = 128
+    yaw: int = 128
+
+    def clamped(self) -> "E88SticksRaw":
+        return E88SticksRaw(
+            left_right=int(max(0, min(255, self.left_right))),
+            forward_back=int(max(0, min(255, self.forward_back))),
+            throttle=int(max(0, min(255, self.throttle))),
+            yaw=int(max(0, min(255, self.yaw))),
+        )
+
+    @staticmethod
+    def neutral() -> "E88SticksRaw":
+        return E88SticksRaw()
+
+
 @dataclass
 class E88RcState:
     roll: int = 128

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -19,6 +19,7 @@ class E88VideoStream:
         self._frame_lock = threading.Lock()
         self._frame_ready = threading.Condition(self._frame_lock)
         self._last_frame: Optional[np.ndarray] = None
+        self._last_frame_ts: Optional[float] = None
         self._paused = False
         self._reopen = False
 
@@ -48,6 +49,14 @@ class E88VideoStream:
             if self._last_frame is None:
                 return None
             return self._last_frame.copy()
+
+    def get_frame_with_timestamp(self, timeout: Optional[float] = None) -> Optional[Tuple[np.ndarray, float]]:
+        with self._frame_ready:
+            if self._last_frame is None or self._last_frame_ts is None:
+                self._frame_ready.wait(timeout=timeout)
+            if self._last_frame is None or self._last_frame_ts is None:
+                return None
+            return self._last_frame.copy(), float(self._last_frame_ts)
 
     def _release_cap(self) -> None:
         if self._cap:
@@ -95,6 +104,7 @@ class E88VideoStream:
 
             with self._frame_ready:
                 self._last_frame = frame
+                self._last_frame_ts = time.monotonic()
                 self._frame_ready.notify_all()
 
             time.sleep(0.001)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
 from e88.drone import E88Drone
+from e88.rc import E88SticksRaw
 
 
 class Drone:
@@ -21,11 +22,21 @@ class Drone:
     def get_frame(self, timeout: Optional[float] = None) -> Optional[np.ndarray]:
         return self._impl.get_frame(timeout=timeout)
 
+    def get_frame_with_timestamp(self, timeout: Optional[float] = None) -> Optional[Tuple[np.ndarray, float]]:
+        if not hasattr(self._impl, "get_frame_with_timestamp"):
+            raise NotImplementedError(f"get_frame_with_timestamp not supported for protocol {self._protocol}")
+        return self._impl.get_frame_with_timestamp(timeout=timeout)
+
     def send_cmd(self, *, roll: float = 0.0, pitch: float = 0.0, yaw: float = 0.0, throttle: float = 50.0) -> None:
         self._impl.send_cmd(roll=roll, pitch=pitch, yaw=yaw, throttle=throttle)
 
     def set_sticks_raw(self, *, roll: Optional[int] = None, pitch: Optional[int] = None, throttle: Optional[int] = None, yaw: Optional[int] = None) -> None:
         self._impl.set_sticks_raw(roll=roll, pitch=pitch, throttle=throttle, yaw=yaw)
+
+    def set_sticks(self, sticks: E88SticksRaw) -> None:
+        if not hasattr(self._impl, "set_sticks"):
+            raise NotImplementedError(f"set_sticks not supported for protocol {self._protocol}")
+        self._impl.set_sticks(sticks)
 
     def takeoff(self) -> None:
         self._impl.takeoff()
