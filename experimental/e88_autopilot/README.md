@@ -10,8 +10,6 @@ The goal is simple:
 - Convert the estimated drift into small **roll/pitch compensation commands**.
 - Provide real-time **telemetry** for a Qt UI (optical-flow overlay + 2D motion/compensation plot).
 
-This README is written to be understandable by software engineers who have not previously worked with computer vision or control.
-
 ---
 
 ## Index
