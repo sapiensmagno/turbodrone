@@ -43,8 +43,17 @@ def run_stationary_calibration(
     if not (50.0 <= p <= 100.0):
         raise ValueError(f"percentile must be in [50, 100], got {percentile}")
 
+    print(
+        f"[calibration] start stationary calibration: duration={dur:.1f}s min_quality={qmin:.2f} percentile={p:.1f} sigma_scale={float(sigma_scale):.2f}"
+    )
+
     flow = LucasKanadeDriftEstimator()
     t0 = time.monotonic()
+
+    last_report = t0
+    n_frames = 0
+    n_flow_ok = 0
+    n_quality_ok = 0
 
     vx_s: list[float] = []
     vy_s: list[float] = []
@@ -54,13 +63,23 @@ def run_stationary_calibration(
         if item is None:
             continue
         frame, ts = item
+        n_frames += 1
         est = flow.update(frame, timestamp=ts)
         if est is None:
             continue
+        n_flow_ok += 1
         if float(est.quality) < qmin:
             continue
+        n_quality_ok += 1
         vx_s.append(float(est.vx_px_s))
         vy_s.append(float(est.vy_px_s))
+
+        now = time.monotonic()
+        if (now - last_report) >= 1.0:
+            last_report = now
+            print(
+                f"[calibration] t={now - t0:.1f}s frames={n_frames} flow_ok={n_flow_ok} q_ok={n_quality_ok} samples={len(vx_s)}"
+            )
 
     if len(vx_s) < 20:
         raise RuntimeError(f"not enough samples for calibration: got {len(vx_s)}")
@@ -76,6 +95,10 @@ def run_stationary_calibration(
     sy = _robust_sigma(vy)
     sigma_v = float(np.sqrt((sx * sx + sy * sy) / 2.0))
     sigma_v = float(max(1e-3, sigma_v * float(sigma_scale)))
+
+    print(
+        f"[calibration] done: samples={len(vx_s)} est_deadband={deadband:.4f} px/s sigma_v={sigma_v:.4f} px/s"
+    )
 
     return StationaryCalibrationResult(
         created_at_ts=float(time.time()),

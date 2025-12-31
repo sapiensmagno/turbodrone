@@ -1,11 +1,12 @@
 import sys
 import threading
+import time
 from typing import Optional
 
 import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QThread, QTimer
-from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -16,6 +17,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QShortcut,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -188,13 +190,12 @@ class _TrajectoryWidget(QWidget):
         dx = (self._cmd_roll / self._max_cmd) * arrow_len
         dy = (self._cmd_pitch / self._max_cmd) * arrow_len
         ax, ay = map_pt(cur_x + dx, cur_y + dy)
-
         p.setPen(QPen(QColor(255, 220, 0), 3))
         p.drawLine(int(cx), int(cy), int(ax), int(ay))
 
 
 class E88QtControllerWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
 
         self.setWindowTitle("E88 Pro Controller")
@@ -216,6 +217,7 @@ class E88QtControllerWindow(QMainWindow):
 
         self._calibration_worker: Optional[_CalibrationWorker] = None
         self._calibration_running = False
+        self._calibration_started_at = 0.0
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -245,6 +247,12 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_start_button.clicked.connect(self._start_autopilot)
         top_row.addWidget(self.autopilot_start_button)
 
+        self.emergency_land_button = QPushButton("EMERGENCY LAND")
+        self.emergency_land_button.setFixedSize(170, 40)
+        self.emergency_land_button.setStyleSheet("background-color: #b00020; color: white; font-weight: bold;")
+        self.emergency_land_button.clicked.connect(self._emergency_land)
+        top_row.addWidget(self.emergency_land_button)
+
         self.calibrate_button = QPushButton("Calibrate (still)")
         self.calibrate_button.setFixedSize(140, 40)
         self.calibrate_button.clicked.connect(self._start_calibration)
@@ -262,136 +270,149 @@ class E88QtControllerWindow(QMainWindow):
         bottom_row = QHBoxLayout()
 
         self.autopilot_cfg_group = QGroupBox("Autostabilizer")
-        self.autopilot_cfg_form = QFormLayout(self.autopilot_cfg_group)
+        self.autopilot_cfg_form_left = QFormLayout()
+        self.autopilot_cfg_form_right = QFormLayout()
+        autopilot_cfg_cols = QHBoxLayout(self.autopilot_cfg_group)
+        autopilot_cfg_cols.addLayout(self.autopilot_cfg_form_left)
+        autopilot_cfg_cols.addLayout(self.autopilot_cfg_form_right)
 
         cfg_defaults = StabilizerConfig()
 
         self.cfg_enable_takeoff = QCheckBox()
         self.cfg_enable_takeoff.setChecked(bool(cfg_defaults.enable_takeoff))
-        self.autopilot_cfg_form.addRow("Enable takeoff", self.cfg_enable_takeoff)
+        self.autopilot_cfg_form_left.addRow("Enable takeoff", self.cfg_enable_takeoff)
 
         self.cfg_takeoff_throttle = QDoubleSpinBox()
         self.cfg_takeoff_throttle.setRange(0.0, 100.0)
         self.cfg_takeoff_throttle.setValue(float(cfg_defaults.takeoff_throttle))
-        self.autopilot_cfg_form.addRow("Takeoff throttle", self.cfg_takeoff_throttle)
+        self.autopilot_cfg_form_left.addRow("Takeoff throttle", self.cfg_takeoff_throttle)
 
         self.cfg_takeoff_duration = QDoubleSpinBox()
         self.cfg_takeoff_duration.setRange(0.0, 10.0)
         self.cfg_takeoff_duration.setSingleStep(0.1)
         self.cfg_takeoff_duration.setValue(float(cfg_defaults.takeoff_duration_sec))
-        self.autopilot_cfg_form.addRow("Takeoff duration (s)", self.cfg_takeoff_duration)
+        self.autopilot_cfg_form_left.addRow("Takeoff duration (s)", self.cfg_takeoff_duration)
 
         self.cfg_climb_throttle = QDoubleSpinBox()
         self.cfg_climb_throttle.setRange(0.0, 100.0)
         self.cfg_climb_throttle.setValue(float(cfg_defaults.climb_throttle))
-        self.autopilot_cfg_form.addRow("Climb throttle", self.cfg_climb_throttle)
+        self.autopilot_cfg_form_left.addRow("Climb throttle", self.cfg_climb_throttle)
 
         self.cfg_climb_duration = QDoubleSpinBox()
         self.cfg_climb_duration.setRange(0.0, 10.0)
         self.cfg_climb_duration.setSingleStep(0.1)
         self.cfg_climb_duration.setValue(float(cfg_defaults.climb_duration_sec))
-        self.autopilot_cfg_form.addRow("Climb duration (s)", self.cfg_climb_duration)
+        self.autopilot_cfg_form_left.addRow("Climb duration (s)", self.cfg_climb_duration)
 
         self.cfg_settle_good_frames = QSpinBox()
         self.cfg_settle_good_frames.setRange(0, 60)
         self.cfg_settle_good_frames.setValue(int(cfg_defaults.settle_good_frames))
-        self.autopilot_cfg_form.addRow("Settle good frames", self.cfg_settle_good_frames)
+        self.autopilot_cfg_form_left.addRow("Settle good frames", self.cfg_settle_good_frames)
 
         self.cfg_base_throttle = QDoubleSpinBox()
         self.cfg_base_throttle.setRange(0.0, 100.0)
         self.cfg_base_throttle.setValue(float(cfg_defaults.base_throttle))
-        self.autopilot_cfg_form.addRow("Base throttle", self.cfg_base_throttle)
+        self.autopilot_cfg_form_left.addRow("Base throttle", self.cfg_base_throttle)
 
         self.cfg_rate_hz = QDoubleSpinBox()
         self.cfg_rate_hz.setRange(1.0, 60.0)
         self.cfg_rate_hz.setValue(float(cfg_defaults.cmd_rate_hz))
-        self.autopilot_cfg_form.addRow("Cmd rate (Hz)", self.cfg_rate_hz)
+        self.autopilot_cfg_form_left.addRow("Cmd rate (Hz)", self.cfg_rate_hz)
 
         self.cfg_use_kalman = QCheckBox()
         self.cfg_use_kalman.setChecked(bool(cfg_defaults.use_kalman))
-        self.autopilot_cfg_form.addRow("Use Kalman", self.cfg_use_kalman)
+        self.autopilot_cfg_form_left.addRow("Use Kalman", self.cfg_use_kalman)
 
         self.cfg_sigma_a = QDoubleSpinBox()
         self.cfg_sigma_a.setRange(0.1, 500.0)
         self.cfg_sigma_a.setValue(float(cfg_defaults.kalman_sigma_a))
-        self.autopilot_cfg_form.addRow("Kalman sigma_a", self.cfg_sigma_a)
+        self.autopilot_cfg_form_left.addRow("Kalman sigma_a", self.cfg_sigma_a)
 
         self.cfg_sigma_v = QDoubleSpinBox()
         self.cfg_sigma_v.setRange(0.1, 500.0)
         self.cfg_sigma_v.setValue(float(cfg_defaults.kalman_sigma_v))
-        self.autopilot_cfg_form.addRow("Kalman sigma_v", self.cfg_sigma_v)
+        self.autopilot_cfg_form_left.addRow("Kalman sigma_v", self.cfg_sigma_v)
 
         self.cfg_min_quality = QDoubleSpinBox()
         self.cfg_min_quality.setRange(0.0, 1.0)
         self.cfg_min_quality.setSingleStep(0.01)
         self.cfg_min_quality.setValue(float(cfg_defaults.min_quality))
-        self.autopilot_cfg_form.addRow("Min quality", self.cfg_min_quality)
+        self.autopilot_cfg_form_left.addRow("Min quality", self.cfg_min_quality)
 
         self.cfg_max_cmd = QDoubleSpinBox()
         self.cfg_max_cmd.setRange(0.0, 1.0)
         self.cfg_max_cmd.setSingleStep(0.01)
         self.cfg_max_cmd.setValue(float(cfg_defaults.max_cmd))
         self.cfg_max_cmd.valueChanged.connect(lambda v: self.traj_widget.set_max_cmd(float(v)))
-        self.autopilot_cfg_form.addRow("Max cmd", self.cfg_max_cmd)
+        self.autopilot_cfg_form_left.addRow("Max cmd", self.cfg_max_cmd)
 
         self.cfg_kp_vx = QDoubleSpinBox()
         self.cfg_kp_vx.setDecimals(6)
         self.cfg_kp_vx.setRange(0.0, 1.0)
         self.cfg_kp_vx.setValue(float(cfg_defaults.kp_vx))
-        self.autopilot_cfg_form.addRow("Kp vx", self.cfg_kp_vx)
+        self.autopilot_cfg_form_right.addRow("Kp vx", self.cfg_kp_vx)
 
         self.cfg_kp_vy = QDoubleSpinBox()
         self.cfg_kp_vy.setDecimals(6)
         self.cfg_kp_vy.setRange(0.0, 1.0)
         self.cfg_kp_vy.setValue(float(cfg_defaults.kp_vy))
-        self.autopilot_cfg_form.addRow("Kp vy", self.cfg_kp_vy)
+        self.autopilot_cfg_form_right.addRow("Kp vy", self.cfg_kp_vy)
 
         self.cfg_ki_vx = QDoubleSpinBox()
         self.cfg_ki_vx.setDecimals(6)
         self.cfg_ki_vx.setRange(0.0, 1.0)
         self.cfg_ki_vx.setValue(float(cfg_defaults.ki_vx))
-        self.autopilot_cfg_form.addRow("Ki vx", self.cfg_ki_vx)
+        self.autopilot_cfg_form_right.addRow("Ki vx", self.cfg_ki_vx)
 
         self.cfg_ki_vy = QDoubleSpinBox()
         self.cfg_ki_vy.setDecimals(6)
         self.cfg_ki_vy.setRange(0.0, 1.0)
         self.cfg_ki_vy.setValue(float(cfg_defaults.ki_vy))
-        self.autopilot_cfg_form.addRow("Ki vy", self.cfg_ki_vy)
+        self.autopilot_cfg_form_right.addRow("Ki vy", self.cfg_ki_vy)
 
         self.cfg_deadband = QDoubleSpinBox()
         self.cfg_deadband.setRange(0.0, 100.0)
         self.cfg_deadband.setValue(float(cfg_defaults.deadband_px_s))
-        self.autopilot_cfg_form.addRow("Deadband (px/s)", self.cfg_deadband)
+        self.autopilot_cfg_form_right.addRow("Deadband (px/s)", self.cfg_deadband)
 
         self.cfg_est_deadband = QDoubleSpinBox()
         self.cfg_est_deadband.setRange(0.0, 100.0)
         self.cfg_est_deadband.setValue(float(cfg_defaults.estimator_deadband_px_s))
-        self.autopilot_cfg_form.addRow("Estimator deadband (px/s)", self.cfg_est_deadband)
+        self.autopilot_cfg_form_right.addRow("Estimator deadband (px/s)", self.cfg_est_deadband)
 
         self.cfg_roll_sign = QDoubleSpinBox()
         self.cfg_roll_sign.setRange(-1.0, 1.0)
         self.cfg_roll_sign.setSingleStep(2.0)
         self.cfg_roll_sign.setValue(float(cfg_defaults.roll_sign))
-        self.autopilot_cfg_form.addRow("Roll sign", self.cfg_roll_sign)
+        self.autopilot_cfg_form_right.addRow("Roll sign", self.cfg_roll_sign)
 
         self.cfg_pitch_sign = QDoubleSpinBox()
         self.cfg_pitch_sign.setRange(-1.0, 1.0)
         self.cfg_pitch_sign.setSingleStep(2.0)
         self.cfg_pitch_sign.setValue(float(cfg_defaults.pitch_sign))
-        self.autopilot_cfg_form.addRow("Pitch sign", self.cfg_pitch_sign)
+        self.autopilot_cfg_form_right.addRow("Pitch sign", self.cfg_pitch_sign)
 
         self.cfg_duration = QDoubleSpinBox()
         self.cfg_duration.setRange(0.0, 600.0)
         self.cfg_duration.setValue(0.0)
-        self.autopilot_cfg_form.addRow("Duration (s, 0=inf)", self.cfg_duration)
+        self.autopilot_cfg_form_right.addRow("Duration (s, 0=inf)", self.cfg_duration)
 
         self.cfg_calib_duration = QDoubleSpinBox()
         self.cfg_calib_duration.setRange(1.0, 60.0)
         self.cfg_calib_duration.setSingleStep(1.0)
         self.cfg_calib_duration.setValue(10.0)
-        self.autopilot_cfg_form.addRow("Calib duration (s)", self.cfg_calib_duration)
+        self.autopilot_cfg_form_right.addRow("Calib duration (s)", self.cfg_calib_duration)
+
+        self.keyboard_help_group = QGroupBox("Keyboard")
+        self.keyboard_help_label = QLabel()
+        self.keyboard_help_label.setTextFormat(Qt.PlainText)
+        self.keyboard_help_label.setStyleSheet("font-family: monospace;")
+        help_layout = QVBoxLayout(self.keyboard_help_group)
+        help_layout.addWidget(self.keyboard_help_label)
+        self._update_keyboard_help()
 
         bottom_row.addWidget(self.autopilot_cfg_group)
+        bottom_row.addWidget(self.keyboard_help_group)
 
         self.traj_widget = _TrajectoryWidget(self)
         bottom_row.addWidget(self.traj_widget)
@@ -402,6 +423,12 @@ class E88QtControllerWindow(QMainWindow):
         self.layout.addWidget(self.status_label)
 
         self.setFocusPolicy(Qt.StrongFocus)
+
+        self._sc_toggle_autopilot = QShortcut(QKeySequence("P"), self)
+        self._sc_toggle_autopilot.activated.connect(self._toggle_autopilot)
+
+        self._sc_emergency_land = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self._sc_emergency_land.activated.connect(self._emergency_land)
 
         self._video_timer = QTimer(self)
         self._video_timer.timeout.connect(self._tick_video)
@@ -654,6 +681,7 @@ class E88QtControllerWindow(QMainWindow):
         duration_sec = float(self.cfg_calib_duration.value())
         min_quality = float(self.cfg_min_quality.value())
         self.status_label.setText("Calibrating... keep drone still")
+        self._calibration_started_at = float(time.monotonic())
         self._calibration_worker = _CalibrationWorker(self._drone, duration_sec=duration_sec, min_quality=min_quality)
         self._calibration_worker.finished.connect(self._on_calibration_finished)
         self._set_calibration_running(True)
@@ -677,12 +705,81 @@ class E88QtControllerWindow(QMainWindow):
             self._calibration_worker = None
             return
 
+        prev_sigma_v = float(self.cfg_sigma_v.value())
+        prev_est_db = float(self.cfg_est_deadband.value())
+
         self.cfg_sigma_v.setValue(float(r.kalman_sigma_v))
         self.cfg_est_deadband.setValue(float(r.estimator_deadband_px_s))
+
+        changed = []
+        if abs(prev_sigma_v - float(r.kalman_sigma_v)) > 1e-6:
+            changed.append("Kalman sigma_v")
+            self._flash_widget(self.cfg_sigma_v)
+        if abs(prev_est_db - float(r.estimator_deadband_px_s)) > 1e-6:
+            changed.append("Estimator deadband")
+            self._flash_widget(self.cfg_est_deadband)
+
+        changed_str = "" if not changed else (" (updated: " + ", ".join(changed) + ")")
         self.status_label.setText(
-            f"Calibration saved. est_deadband {r.estimator_deadband_px_s:.2f} px/s, sigma_v {r.kalman_sigma_v:.2f}"
+            f"Calibration saved. est_deadband {r.estimator_deadband_px_s:.2f} px/s, sigma_v {r.kalman_sigma_v:.2f}{changed_str}"
         )
         self._calibration_worker = None
+
+    def _update_keyboard_help(self) -> None:
+        self.keyboard_help_label.setText(
+            "Manual control (disabled during autopilot):\n"
+            "  Arrow keys: roll/pitch\n"
+            "  W/S: throttle up/down\n"
+            "  A/D: yaw left/right\n"
+            "\n"
+            "Actions:\n"
+            "  Z: takeoff\n"
+            "  X: land\n"
+            "  C: calibrate gyro\n"
+            "  1/2: switch camera\n"
+            "  H: toggle headless\n"
+            "  F: flip\n"
+            "\n"
+            "Autopilot:\n"
+            "  P: start/stop autostabilizer\n"
+            "\n"
+            "Emergency:\n"
+            "  Esc: emergency land (also stops autostabilizer)"
+        )
+
+    def _toggle_autopilot(self) -> None:
+        if self._calibration_running:
+            return
+        if self._autopilot_running:
+            self._stop_autopilot()
+            return
+        self._start_autopilot()
+
+    def _emergency_land(self) -> None:
+        try:
+            self._stop_autopilot()
+        except Exception:
+            pass
+
+        try:
+            self._drone.land()
+        except Exception:
+            pass
+
+        self.status_label.setText("Emergency land triggered")
+
+    def _flash_widget(self, w: QWidget) -> None:
+        try:
+            prev = w.styleSheet()
+        except Exception:
+            prev = ""
+
+        w.setStyleSheet(prev + "\nbackground-color: #fff2a8;")
+
+        def _restore() -> None:
+            w.setStyleSheet(prev)
+
+        QTimer.singleShot(2500, _restore)
 
     def _tick_autopilot(self) -> None:
         w = self._autopilot_worker
