@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from e88_autopilot.calibration import load_calibration, run_stationary_calibration, save_calibration
 from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig, StabilizerTelemetry
 from turbodrone import Drone
 
@@ -61,6 +62,37 @@ class _AutostabilizerWorker(QThread):
         if s is None:
             return
         s.request_stop()
+
+    @property
+    def error(self) -> Optional[BaseException]:
+        return self._error
+
+
+class _CalibrationWorker(QThread):
+    def __init__(self, drone: Drone, *, duration_sec: float, min_quality: float) -> None:
+        super().__init__()
+        self._drone = drone
+        self._duration_sec = float(duration_sec)
+        self._min_quality = float(min_quality)
+
+        self._result = None
+        self._error: Optional[BaseException] = None
+
+    def run(self) -> None:
+        try:
+            r = run_stationary_calibration(
+                self._drone,
+                duration_sec=float(self._duration_sec),
+                min_quality=float(self._min_quality),
+            )
+            save_calibration(r)
+            self._result = r
+        except BaseException as e:
+            self._error = e
+
+    @property
+    def result(self):
+        return self._result
 
     @property
     def error(self) -> Optional[BaseException]:
@@ -182,6 +214,9 @@ class E88QtControllerWindow(QMainWindow):
         self._autopilot_worker: Optional[_AutostabilizerWorker] = None
         self._autopilot_running = False
 
+        self._calibration_worker: Optional[_CalibrationWorker] = None
+        self._calibration_running = False
+
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
@@ -209,6 +244,11 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_start_button.setFixedSize(160, 40)
         self.autopilot_start_button.clicked.connect(self._start_autopilot)
         top_row.addWidget(self.autopilot_start_button)
+
+        self.calibrate_button = QPushButton("Calibrate (still)")
+        self.calibrate_button.setFixedSize(140, 40)
+        self.calibrate_button.clicked.connect(self._start_calibration)
+        top_row.addWidget(self.calibrate_button)
 
         self.autopilot_stop_button = QPushButton("Stop autostabilizer")
         self.autopilot_stop_button.setFixedSize(160, 40)
@@ -323,6 +363,11 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_deadband.setValue(float(cfg_defaults.deadband_px_s))
         self.autopilot_cfg_form.addRow("Deadband (px/s)", self.cfg_deadband)
 
+        self.cfg_est_deadband = QDoubleSpinBox()
+        self.cfg_est_deadband.setRange(0.0, 100.0)
+        self.cfg_est_deadband.setValue(float(cfg_defaults.estimator_deadband_px_s))
+        self.autopilot_cfg_form.addRow("Estimator deadband (px/s)", self.cfg_est_deadband)
+
         self.cfg_roll_sign = QDoubleSpinBox()
         self.cfg_roll_sign.setRange(-1.0, 1.0)
         self.cfg_roll_sign.setSingleStep(2.0)
@@ -339,6 +384,12 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_duration.setRange(0.0, 600.0)
         self.cfg_duration.setValue(0.0)
         self.autopilot_cfg_form.addRow("Duration (s, 0=inf)", self.cfg_duration)
+
+        self.cfg_calib_duration = QDoubleSpinBox()
+        self.cfg_calib_duration.setRange(1.0, 60.0)
+        self.cfg_calib_duration.setSingleStep(1.0)
+        self.cfg_calib_duration.setValue(10.0)
+        self.autopilot_cfg_form.addRow("Calib duration (s)", self.cfg_calib_duration)
 
         bottom_row.addWidget(self.autopilot_cfg_group)
 
@@ -364,6 +415,14 @@ class E88QtControllerWindow(QMainWindow):
         self._control_timer.timeout.connect(self._tick_controls)
         self._control_timer.start(30)
 
+        saved = load_calibration()
+        if saved is not None:
+            self.cfg_sigma_v.setValue(float(saved.kalman_sigma_v))
+            self.cfg_est_deadband.setValue(float(saved.estimator_deadband_px_s))
+            self.status_label.setText(
+                f"Loaded calibration: est_deadband {saved.estimator_deadband_px_s:.2f} px/s, sigma_v {saved.kalman_sigma_v:.2f}"
+            )
+
     def closeEvent(self, event):
         try:
             self._stop_autopilot()
@@ -371,6 +430,10 @@ class E88QtControllerWindow(QMainWindow):
             w = self._autopilot_worker
             if w is not None and w.isRunning():
                 w.wait(2000)
+
+            cw = self._calibration_worker
+            if cw is not None and cw.isRunning():
+                cw.wait(2000)
 
             self._drone.close()
         except Exception:
@@ -460,7 +523,7 @@ class E88QtControllerWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _tick_controls(self) -> None:
-        if self._autopilot_running:
+        if self._autopilot_running or self._calibration_running:
             return
         self._drone.set_sticks_raw(
             roll=self._roll,
@@ -475,7 +538,7 @@ class E88QtControllerWindow(QMainWindow):
         self._yaw = self._decay_to_center(self._yaw)
 
     def _tick_video(self) -> None:
-        if self._autopilot_running:
+        if self._autopilot_running or self._calibration_running:
             return
         frame = self._drone.get_frame(timeout=0)
         if frame is None:
@@ -517,12 +580,15 @@ class E88QtControllerWindow(QMainWindow):
             ki_vx=float(self.cfg_ki_vx.value()),
             ki_vy=float(self.cfg_ki_vy.value()),
             deadband_px_s=float(self.cfg_deadband.value()),
+            estimator_deadband_px_s=float(self.cfg_est_deadband.value()),
             roll_sign=float(self.cfg_roll_sign.value()),
             pitch_sign=float(self.cfg_pitch_sign.value()),
         )
 
     def _start_autopilot(self) -> None:
         if self._autopilot_worker is not None and self._autopilot_worker.isRunning():
+            return
+        if self._calibration_running:
             return
 
         cfg = self._build_cfg()
@@ -570,6 +636,53 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_start_button.setEnabled(not self._autopilot_running)
         self.autopilot_stop_button.setEnabled(self._autopilot_running)
         self.autopilot_cfg_group.setEnabled(not self._autopilot_running)
+        self.calibrate_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+
+    def _set_calibration_running(self, running: bool) -> None:
+        self._calibration_running = bool(running)
+        self.autopilot_start_button.setEnabled((not self._calibration_running) and (not self._autopilot_running))
+        self.autopilot_stop_button.setEnabled(self._autopilot_running and (not self._calibration_running))
+        self.autopilot_cfg_group.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.calibrate_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+
+    def _start_calibration(self) -> None:
+        if self._autopilot_running:
+            return
+        if self._calibration_worker is not None and self._calibration_worker.isRunning():
+            return
+
+        duration_sec = float(self.cfg_calib_duration.value())
+        min_quality = float(self.cfg_min_quality.value())
+        self.status_label.setText("Calibrating... keep drone still")
+        self._calibration_worker = _CalibrationWorker(self._drone, duration_sec=duration_sec, min_quality=min_quality)
+        self._calibration_worker.finished.connect(self._on_calibration_finished)
+        self._set_calibration_running(True)
+        self._calibration_worker.start()
+
+    def _on_calibration_finished(self) -> None:
+        w = self._calibration_worker
+        self._set_calibration_running(False)
+
+        if w is None:
+            self.status_label.setText("")
+            return
+        if w.error is not None:
+            self.status_label.setText(f"Calibration error: {type(w.error).__name__}: {w.error}")
+            self._calibration_worker = None
+            return
+
+        r = w.result
+        if r is None:
+            self.status_label.setText("Calibration error: no result")
+            self._calibration_worker = None
+            return
+
+        self.cfg_sigma_v.setValue(float(r.kalman_sigma_v))
+        self.cfg_est_deadband.setValue(float(r.estimator_deadband_px_s))
+        self.status_label.setText(
+            f"Calibration saved. est_deadband {r.estimator_deadband_px_s:.2f} px/s, sigma_v {r.kalman_sigma_v:.2f}"
+        )
+        self._calibration_worker = None
 
     def _tick_autopilot(self) -> None:
         w = self._autopilot_worker
@@ -617,8 +730,17 @@ class E88QtControllerWindow(QMainWindow):
             )
             cv2.putText(
                 view,
+                f"kf_in vx {t.kf_input_vx_px_s:+.1f} vy {t.kf_input_vy_px_s:+.1f} gated {int(bool(t.kf_gated))}",
+                (10, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 0),
+                2,
+            )
+            cv2.putText(
+                view,
                 f"cmd roll {t.cmd_roll:+.2f} pitch {t.cmd_pitch:+.2f} thr {t.cmd_throttle:.1f}",
-                (10, 75),
+                (10, 95),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (255, 255, 0),

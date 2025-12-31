@@ -1,0 +1,12 @@
+{
+  "result": {
+    "created_at_ts": 1767195431.1849408,
+    "duration_sec": 10.0,
+    "estimator_deadband_px_s": 0.36008302293865513,
+    "kalman_sigma_v": 0.1437124872765157,
+    "min_quality": 0.15,
+    "n_samples": 93,
+    "percentile": 99.0
+  },
+  "version": 1
+}

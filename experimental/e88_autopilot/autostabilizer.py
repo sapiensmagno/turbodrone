@@ -10,6 +10,7 @@ import numpy as np
 from e88_autopilot.controller import VelocityHoldController
 from e88_autopilot.kalman import VelocityKalman2D
 from e88_autopilot.kalman import KalmanEstimate
+from e88_autopilot.measurement_conditioner import VelocityMeasurementConditioner
 from e88_autopilot.optical_flow import FlowEstimate, FlowTracks, LucasKanadeDriftEstimator
 from turbodrone import Drone
 
@@ -38,6 +39,7 @@ class StabilizerConfig:
     ki_vx: float = 0.0005
     ki_vy: float = 0.0005
     deadband_px_s: float = 3.0
+    estimator_deadband_px_s: float = 3.0
     roll_sign: float = -1.0
     pitch_sign: float = -1.0
 
@@ -57,6 +59,9 @@ class StabilizerTelemetry:
     cmd_roll: float
     cmd_pitch: float
     cmd_throttle: float
+    kf_input_vx_px_s: float = 0.0
+    kf_input_vy_px_s: float = 0.0
+    kf_gated: bool = False
 
 
 class AutoStabilizer:
@@ -75,6 +80,8 @@ class AutoStabilizer:
         self._kf = None
         if self._cfg.use_kalman:
             self._kf = VelocityKalman2D(sigma_a=self._cfg.kalman_sigma_a, sigma_v_meas=self._cfg.kalman_sigma_v)
+
+        self._meas_cond = VelocityMeasurementConditioner(deadband_px_s=self._cfg.estimator_deadband_px_s)
 
         self._ctl = VelocityHoldController(
             min_quality=self._cfg.min_quality,
@@ -202,6 +209,7 @@ class AutoStabilizer:
                     continue
 
                 frame, ts = item
+
                 est = self._flow.update(frame, timestamp=ts)
                 if est is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.climb_throttle)
@@ -231,8 +239,9 @@ class AutoStabilizer:
 
                 self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.climb_throttle)
 
-                self._viz_x_px += float(est.vx_px_s) * float(est.dt_sec)
-                self._viz_y_px += float(est.vy_px_s) * float(est.dt_sec)
+                cond = self._meas_cond.apply(vx_px_s=float(est.vx_px_s), vy_px_s=float(est.vy_px_s))
+                self._viz_x_px += float(cond.vx_px_s) * float(est.dt_sec)
+                self._viz_y_px += float(cond.vy_px_s) * float(est.dt_sec)
 
                 self._emit(
                     StabilizerTelemetry(
@@ -244,8 +253,11 @@ class AutoStabilizer:
                         flow=est,
                         tracks=self._flow.last_tracks(),
                         kalman=None,
-                        used_vx_px_s=float(est.vx_px_s),
-                        used_vy_px_s=float(est.vy_px_s),
+                        used_vx_px_s=float(cond.vx_px_s),
+                        used_vy_px_s=float(cond.vy_px_s),
+                        kf_input_vx_px_s=float(cond.vx_px_s),
+                        kf_input_vy_px_s=float(cond.vy_px_s),
+                        kf_gated=bool(cond.gated),
                         cmd_roll=0.0,
                         cmd_pitch=0.0,
                         cmd_throttle=float(self._cfg.climb_throttle),
@@ -311,8 +323,11 @@ class AutoStabilizer:
                 time.sleep(period)
                 continue
 
-            vx, vy = est.vx_px_s, est.vy_px_s
+            flow_vx, flow_vy = float(est.vx_px_s), float(est.vy_px_s)
             q = est.quality
+
+            cond = self._meas_cond.apply(vx_px_s=flow_vx, vy_px_s=flow_vy)
+            vx, vy = float(cond.vx_px_s), float(cond.vy_px_s)
             k_est = None
             if self._kf is not None:
                 k_est = self._kf.update_velocity(t=ts, vx_px_s=vx, vy_px_s=vy, quality=q)
@@ -338,6 +353,9 @@ class AutoStabilizer:
                         kalman=k_est,
                         used_vx_px_s=float(vx),
                         used_vy_px_s=float(vy),
+                        kf_input_vx_px_s=float(cond.vx_px_s),
+                        kf_input_vy_px_s=float(cond.vy_px_s),
+                        kf_gated=bool(cond.gated),
                         cmd_roll=0.0,
                         cmd_pitch=0.0,
                         cmd_throttle=float(self._cfg.base_throttle),
@@ -358,6 +376,9 @@ class AutoStabilizer:
                         kalman=k_est,
                         used_vx_px_s=float(vx),
                         used_vy_px_s=float(vy),
+                        kf_input_vx_px_s=float(cond.vx_px_s),
+                        kf_input_vy_px_s=float(cond.vy_px_s),
+                        kf_gated=bool(cond.gated),
                         cmd_roll=float(out.roll),
                         cmd_pitch=float(out.pitch),
                         cmd_throttle=float(self._cfg.base_throttle),

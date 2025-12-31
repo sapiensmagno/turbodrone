@@ -37,6 +37,7 @@ def main() -> int:
     parser.add_argument("--ki-vx", type=float, default=None)
     parser.add_argument("--ki-vy", type=float, default=None)
     parser.add_argument("--deadband", type=float, default=None)
+    parser.add_argument("--est-deadband", type=float, default=None)
     parser.add_argument("--roll-sign", type=float, default=None)
     parser.add_argument("--pitch-sign", type=float, default=None)
     args = parser.parse_args()
@@ -67,6 +68,7 @@ def main() -> int:
         ki_vx=float(d.ki_vx if args.ki_vx is None else args.ki_vx),
         ki_vy=float(d.ki_vy if args.ki_vy is None else args.ki_vy),
         deadband_px_s=float(d.deadband_px_s if args.deadband is None else args.deadband),
+        estimator_deadband_px_s=float(d.estimator_deadband_px_s if args.est_deadband is None else args.est_deadband),
         roll_sign=float(d.roll_sign if args.roll_sign is None else args.roll_sign),
         pitch_sign=float(d.pitch_sign if args.pitch_sign is None else args.pitch_sign),
     )
