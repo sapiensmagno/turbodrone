@@ -1,7 +1,38 @@
+import os
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Optional
+
+
+def _load_dotenv() -> None:
+    root = Path(__file__).resolve().parents[2]
+    candidates = [root / ".env", root / "experimental" / ".env"]
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            for raw in p.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if len(v) >= 2 and ((v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")):
+                    v = v[1:-1]
+                if k and (k not in os.environ):
+                    os.environ[k] = v
+        except Exception:
+            pass
+
+
+_load_dotenv()
 
 import cv2
 import numpy as np
