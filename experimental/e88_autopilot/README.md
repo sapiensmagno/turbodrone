@@ -36,6 +36,11 @@ The goal is simple:
   - [8.2 “Torn / split frames” (RTSP/UDP artifacts)](#82-torn--split-frames-rtspudp-artifacts)
   - [8.3 Lighting and low-texture scenes](#83-lighting-and-low-texture-scenes)
   - [8.4 Latency, timing, and control rate](#84-latency-timing-and-control-rate)
+  - [8.5 Stationary drift (“ghost motion”) from integrating noisy flow](#85-stationary-drift-ghost-motion-from-integrating-noisy-flow)
+  - [8.6 Conditioning before Kalman: deadband + gating telemetry](#86-conditioning-before-kalman-deadband--gating-telemetry)
+  - [8.7 Stationary calibration and persistence](#87-stationary-calibration-and-persistence)
+  - [8.8 Optical flow scaling with downscale](#88-optical-flow-scaling-with-downscale)
+  - [8.9 Robust fallback for large displacements (phase correlation)](#89-robust-fallback-for-large-displacements-phase-correlation)
 - [9. How to tune safely](#9-how-to-tune-safely)
 - [10. File guide](#10-file-guide)
 
@@ -422,6 +427,110 @@ Mitigation:
 
 - The estimator ignores extremely small `dt`.
 - The control loop uses a fixed `cmd_rate_hz` and sends neutral commands when frames are missing.
+
+### 8.5 Stationary drift (“ghost motion”) from integrating noisy flow
+
+Symptom observed:
+
+- With the drone physically still, the plotted position would drift over time.
+- When Kalman was enabled, the drift could be worse because the filter integrates velocity into position.
+
+Root cause:
+
+- The optical-flow velocity estimate has small zero-mean noise.
+- Even if the controller has a deadband, the Kalman filter was still receiving the *raw* noisy velocity.
+- Integrating that velocity into position accumulates error, producing visible “ghost motion”.
+
+Mitigation implemented:
+
+- A velocity conditioner now runs *before* the Kalman update and can zero out small measurements.
+- We also expose telemetry showing what velocity was actually fed into the filter.
+
+### 8.6 Conditioning before Kalman: deadband + gating telemetry
+
+Design change:
+
+- Introduced `VelocityMeasurementConditioner` (`measurement_conditioner.py`).
+- It applies a deadband in px/s and returns:
+  - conditioned velocities (`vx_px_s`, `vy_px_s`)
+  - a boolean `gated` flag (whether the measurement was suppressed)
+
+Where it lives in the pipeline:
+
+- Optical flow produces `FlowEstimate.vx_px_s/vy_px_s`.
+- Conditioning is applied next.
+- The conditioned values are then passed to `VelocityKalman2D.update_velocity(...)`.
+
+Why this matters:
+
+- The controller deadband prevents over-reacting, but it does not prevent the estimator state from drifting.
+- Conditioning *before* state estimation keeps both the controller and the internal position estimate stable.
+
+Telemetry support:
+
+- `StabilizerTelemetry` now includes:
+  - `kf_input_vx_px_s`, `kf_input_vy_px_s`
+  - `kf_gated`
+
+### 8.7 Stationary calibration and persistence
+
+Problem:
+
+- “Good defaults” for `kalman_sigma_v` and an estimator deadband are environment- and stream-dependent.
+- We needed a repeatable way to tune these from real data while the drone is still.
+
+Mitigation implemented:
+
+- Added stationary calibration (`calibration.py`) which:
+  - samples flow velocities while the drone is stationary,
+  - computes a robust deadband using a percentile of `|vx|` and `|vy|`,
+  - computes a robust `kalman_sigma_v` using MAD-derived sigma.
+
+Persistence:
+
+- Calibration results are stored in `experimental/e88_autopilot/calibration.json`.
+- On startup, the caller can load and apply `estimator_deadband_px_s` and `kalman_sigma_v`.
+
+Why only these parameters:
+
+- This calibration specifically targets the “stationary drift” failure mode and measurement trust.
+- It does not attempt to infer higher-level motion models (e.g., `sigma_a`) or map pixels to meters.
+
+### 8.8 Optical flow scaling with downscale
+
+Symptom observed:
+
+- After calibration, motion was only detected reliably when moving extremely slowly.
+
+Root cause:
+
+- When downscaling frames for LK tracking (performance/robustness), displacement was being reported in the downscaled pixel units.
+- This effectively shrinks the velocity magnitude, making real motion look too small.
+
+Mitigation implemented:
+
+- The estimator now rescales `dx/dy` back to full-resolution pixel units before producing `FlowEstimate`.
+- Internal gating (e.g., translation sanity checks) can still operate in the tracking coordinate system.
+
+### 8.9 Robust fallback for large displacements (phase correlation)
+
+Problem:
+
+- At low effective FPS (e.g., ~9 Hz), the per-frame displacement after takeoff can be large.
+- LK + RANSAC can fail (low inlier ratio) or exceed translation gates, causing repeated resets and loss of velocity signal.
+
+Mitigation implemented:
+
+- Added an optional fallback path based on `cv2.phaseCorrelate`.
+- When LK tracking fails or is rejected (too-large translation / low inlier ratio), the estimator can:
+  - estimate global translation via phase correlation,
+  - return a usable `(dx, dy)` and a quality proxy based on response,
+  - reinitialize tracking afterward to resume LK once motion becomes trackable.
+
+Why phase correlation:
+
+- It is resilient to larger global translations than local-feature tracking.
+- It provides a natural response/quality metric that can be gated.
 
 ---
 
