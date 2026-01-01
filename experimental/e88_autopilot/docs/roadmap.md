@@ -243,6 +243,10 @@
  - Add per-stage timestamps and duration fields to telemetry.
  - Compute and log `estimated_latency_ms`.
  - Add frame and loop rate estimation (moving averages).
+ - Fix the frame acquisition threading model so control is not blocked on frame retrieval:
+   - run video frame acquisition in a dedicated background thread
+   - store only the latest frame in a size-1 buffer (drop stale frames)
+   - expose `t_frame_received` and frame staleness metrics so the control loop can detect when it is operating on old data
  - Add network RTT measurement (startup or on-demand) and persist to `meta.json`.
  - Add sign verification mode:
    - flow sign convention check (manual push test)
@@ -266,6 +270,7 @@
  - **M0.3:** Actual frame rate and loop rate are displayed and recorded.
  - **M0.4:** Sign verification mode exists and writes results to `meta.json`.
  - **M0.5:** Flow health metrics are visible and logged (`n_features`, `n_tracked`, `inlier_ratio`, `fallback_used`).
+ - **M0.6:** Control loop no longer blocks on frame acquisition; stale frames are dropped and staleness is visible in telemetry.
  
  ### Definition of done
  Phase 0 is done when a developer can answer, from UI + logs, at least:
@@ -274,6 +279,7 @@
  - What is processing time vs total loop time?
  - What is the network RTT?
  - Are we operating on stale frames (if measurable)?
+ - Is the control loop decoupled from frame acquisition (no blocking wait on frames) and does it drop stale frames?
  - Are signs correct and verified?
  
  ---
