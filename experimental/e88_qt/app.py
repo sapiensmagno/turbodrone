@@ -46,6 +46,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QShortcut,
@@ -56,15 +57,37 @@ from PyQt5.QtWidgets import (
 
 from e88_autopilot.calibration import load_calibration, run_stationary_calibration, save_calibration
 from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig, StabilizerTelemetry
+from e88_autopilot.session_recorder import SessionRecorder, build_default_meta, measure_icmp_ping_rtt_ms
+from e88.config import E88Config
 from turbodrone import Drone
 
 
 class _AutostabilizerWorker(QThread):
-    def __init__(self, drone: Drone, *, cfg: StabilizerConfig, duration_sec: Optional[float]) -> None:
+    def __init__(
+        self,
+        drone: Drone,
+        *,
+        cfg: StabilizerConfig,
+        duration_sec: Optional[float],
+        recordings_dir: Path,
+        initial_flow_sign_state: int,
+        initial_control_sign_state: int,
+        initial_sign_notes: str,
+    ) -> None:
         super().__init__()
         self._drone = drone
         self._cfg = cfg
         self._duration_sec = duration_sec
+
+        self._recordings_dir = Path(recordings_dir)
+        self._session_recorder: Optional[SessionRecorder] = None
+        self._session_dir: Optional[Path] = None
+
+        self._net_rtt_ms: Optional[float] = None
+
+        self._flow_sign_state = int(initial_flow_sign_state)
+        self._control_sign_state = int(initial_control_sign_state)
+        self._sign_notes = str(initial_sign_notes)
 
         self._latest_lock = threading.Lock()
         self._latest: Optional[StabilizerTelemetry] = None
@@ -72,17 +95,107 @@ class _AutostabilizerWorker(QThread):
         self._stabilizer: Optional[AutoStabilizer] = None
         self._error: Optional[BaseException] = None
 
+    @staticmethod
+    def _tri_to_optional_bool(state: int) -> Optional[bool]:
+        if int(state) == 1:
+            return None
+        if int(state) == 2:
+            return True
+        return False
+
+    def update_sign_verification(self, *, flow_state: int, control_state: int, notes: str) -> None:
+        self._flow_sign_state = int(flow_state)
+        self._control_sign_state = int(control_state)
+        self._sign_notes = str(notes)
+
+        r = self._session_recorder
+        if r is None:
+            return
+
+        r.update_meta({"sign_verification": self._build_sign_verification(updated_at=time.time())})
+
+    def _build_sign_verification(self, *, updated_at: Optional[float]) -> dict:
+        return {
+            "flow_sign_ok": self._tri_to_optional_bool(self._flow_sign_state),
+            "control_sign_ok": self._tri_to_optional_bool(self._control_sign_state),
+            "notes": str(self._sign_notes),
+            "updated_at": updated_at,
+        }
+
+    @staticmethod
+    def _get_ping_host() -> str:
+        return str(E88Config().drone_ip)
+
+    def _start_session(self) -> None:
+        host = self._get_ping_host()
+        self._net_rtt_ms = measure_icmp_ping_rtt_ms(host)
+
+        self._recordings_dir.mkdir(parents=True, exist_ok=True)
+        self._session_recorder = SessionRecorder(base_dir=self._recordings_dir)
+
+        meta = build_default_meta(cfg=self._cfg, net_rtt_ms=self._net_rtt_ms, mode="qt_autostabilizer")
+        meta["sign_verification"] = self._build_sign_verification(updated_at=None)
+        self._session_dir = self._session_recorder.start(meta=meta)
+
+    def _close_session(self) -> None:
+        r = self._session_recorder
+        self._session_recorder = None
+        if r is not None:
+            r.close()
+
     def run(self) -> None:
         try:
+            self._start_session()
+
             self._stabilizer = AutoStabilizer(self._drone, cfg=self._cfg, telemetry_sink=self._on_telemetry)
             self._stabilizer.activate()
             self._stabilizer.run(duration_sec=self._duration_sec)
         except BaseException as e:
             self._error = e
+        finally:
+            self._close_session()
 
     def _on_telemetry(self, t: StabilizerTelemetry) -> None:
         with self._latest_lock:
             self._latest = t
+
+        r = self._session_recorder
+        if r is None:
+            return
+
+        r.write_sample(self._telemetry_to_sample(t))
+
+    @staticmethod
+    def _telemetry_to_sample(t: StabilizerTelemetry) -> dict:
+        return {
+            "phase": str(t.phase),
+            "timestamp": float(t.timestamp),
+            "pos_x_px": float(t.pos_x_px),
+            "pos_y_px": float(t.pos_y_px),
+            "flow": t.flow,
+            "kalman": t.kalman,
+            "cond_vx_px_s": float(t.kf_input_vx_px_s),
+            "cond_vy_px_s": float(t.kf_input_vy_px_s),
+            "cond_gated": bool(t.kf_gated),
+            "used_vx_px_s": float(t.used_vx_px_s),
+            "used_vy_px_s": float(t.used_vy_px_s),
+            "cmd_roll": float(t.cmd_roll),
+            "cmd_pitch": float(t.cmd_pitch),
+            "cmd_throttle": float(t.cmd_throttle),
+            "t_loop_start": float(t.t_loop_start),
+            "t_frame_received": float(t.t_frame_received),
+            "t_flow_start": float(t.t_flow_start),
+            "t_flow_end": float(t.t_flow_end),
+            "t_kf_end": float(t.t_kf_end),
+            "t_ctrl_end": float(t.t_ctrl_end),
+            "t_cmd_sent": float(t.t_cmd_sent),
+            "dt_flow_ms": float(t.dt_flow_ms),
+            "dt_total_ms": float(t.dt_total_ms),
+            "frame_age_ms": float(t.frame_age_ms),
+            "estimated_latency_ms": float(t.estimated_latency_ms),
+            "loop_rate_hz": float(t.loop_rate_hz),
+            "frame_rate_hz": float(t.frame_rate_hz),
+        }
 
     def pop_latest(self) -> Optional[StabilizerTelemetry]:
         with self._latest_lock:
@@ -99,6 +212,14 @@ class _AutostabilizerWorker(QThread):
     @property
     def error(self) -> Optional[BaseException]:
         return self._error
+
+    @property
+    def session_dir(self) -> Optional[Path]:
+        return self._session_dir
+
+    @property
+    def net_rtt_ms(self) -> Optional[float]:
+        return self._net_rtt_ms
 
 
 class _CalibrationWorker(QThread):
@@ -445,6 +566,76 @@ class E88QtControllerWindow(QMainWindow):
         bottom_row.addWidget(self.autopilot_cfg_group)
         bottom_row.addWidget(self.keyboard_help_group)
 
+        self.diagnostics_group = QGroupBox("Diagnostics")
+        self.diagnostics_form = QFormLayout(self.diagnostics_group)
+
+        self.diag_session_label = QLabel("-")
+        self.diag_session_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("Session", self.diag_session_label)
+
+        self.diag_rtt_label = QLabel("-")
+        self.diag_rtt_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("RTT", self.diag_rtt_label)
+
+        self.diag_loop_rate_label = QLabel("-")
+        self.diag_loop_rate_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("Loop rate", self.diag_loop_rate_label)
+
+        self.diag_frame_rate_label = QLabel("-")
+        self.diag_frame_rate_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("Frame rate", self.diag_frame_rate_label)
+
+        self.diag_dt_total_label = QLabel("-")
+        self.diag_dt_total_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("dt total", self.diag_dt_total_label)
+
+        self.diag_dt_flow_label = QLabel("-")
+        self.diag_dt_flow_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("dt flow", self.diag_dt_flow_label)
+
+        self.diag_frame_age_label = QLabel("-")
+        self.diag_frame_age_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("frame age", self.diag_frame_age_label)
+
+        self.diag_latency_label = QLabel("-")
+        self.diag_latency_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("est latency", self.diag_latency_label)
+
+        self.diag_quality_label = QLabel("-")
+        self.diag_quality_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("quality", self.diag_quality_label)
+
+        self.diag_features_label = QLabel("-")
+        self.diag_features_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("features", self.diag_features_label)
+
+        self.diag_inlier_label = QLabel("-")
+        self.diag_inlier_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("inlier ratio", self.diag_inlier_label)
+
+        self.diag_fallback_label = QLabel("-")
+        self.diag_fallback_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("fallback", self.diag_fallback_label)
+
+        self.sign_flow_cb = QCheckBox("Flow sign OK")
+        self.sign_flow_cb.setTristate(True)
+        self.sign_flow_cb.setCheckState(Qt.PartiallyChecked)
+        self.diagnostics_form.addRow("", self.sign_flow_cb)
+
+        self.sign_control_cb = QCheckBox("Control sign OK")
+        self.sign_control_cb.setTristate(True)
+        self.sign_control_cb.setCheckState(Qt.PartiallyChecked)
+        self.diagnostics_form.addRow("", self.sign_control_cb)
+
+        self.sign_notes_edit = QLineEdit()
+        self.diagnostics_form.addRow("Notes", self.sign_notes_edit)
+
+        self.sign_save_button = QPushButton("Save sign verification")
+        self.sign_save_button.clicked.connect(self._save_sign_verification)
+        self.diagnostics_form.addRow("", self.sign_save_button)
+
+        bottom_row.addWidget(self.diagnostics_group)
+
         self.traj_widget = _TrajectoryWidget(self)
         bottom_row.addWidget(self.traj_widget)
 
@@ -653,7 +844,16 @@ class E88QtControllerWindow(QMainWindow):
         duration = float(self.cfg_duration.value())
         duration_sec = None if duration <= 0.0 else duration
 
-        self._autopilot_worker = _AutostabilizerWorker(self._drone, cfg=cfg, duration_sec=duration_sec)
+        recordings_dir = Path(__file__).resolve().parents[1] / "e88_autopilot" / "sessions"
+        self._autopilot_worker = _AutostabilizerWorker(
+            self._drone,
+            cfg=cfg,
+            duration_sec=duration_sec,
+            recordings_dir=recordings_dir,
+            initial_flow_sign_state=int(self.sign_flow_cb.checkState()),
+            initial_control_sign_state=int(self.sign_control_cb.checkState()),
+            initial_sign_notes=str(self.sign_notes_edit.text()),
+        )
         self._autopilot_worker.finished.connect(self._on_autopilot_finished)
         self._autopilot_worker.start()
         self._set_autopilot_running(True)
@@ -816,9 +1016,33 @@ class E88QtControllerWindow(QMainWindow):
         w = self._autopilot_worker
         if w is None:
             return
+
+        if w.session_dir is not None:
+            self.diag_session_label.setText(str(w.session_dir))
+        if w.net_rtt_ms is not None:
+            self.diag_rtt_label.setText(f"{float(w.net_rtt_ms):.1f} ms")
+
         t = w.pop_latest()
         if t is None:
             return
+
+        self.diag_loop_rate_label.setText(f"{float(t.loop_rate_hz):.1f} Hz")
+        self.diag_frame_rate_label.setText(f"{float(t.frame_rate_hz):.1f} Hz")
+        self.diag_dt_total_label.setText(f"{float(t.dt_total_ms):.1f} ms")
+        self.diag_dt_flow_label.setText(f"{float(t.dt_flow_ms):.1f} ms")
+        self.diag_frame_age_label.setText(f"{float(t.frame_age_ms):.1f} ms")
+        self.diag_latency_label.setText(f"{float(t.estimated_latency_ms):.1f} ms")
+
+        if t.flow is None:
+            self.diag_quality_label.setText("-")
+            self.diag_features_label.setText("-")
+            self.diag_inlier_label.setText("-")
+            self.diag_fallback_label.setText("-")
+        else:
+            self.diag_quality_label.setText(f"{float(t.flow.quality):.2f}")
+            self.diag_features_label.setText(f"{int(t.flow.n_tracked)}/{int(t.flow.n_features)}")
+            self.diag_inlier_label.setText(f"{float(t.flow.inlier_ratio):.2f}")
+            self.diag_fallback_label.setText("1" if bool(t.flow.fallback_used) else "0")
 
         frame = t.frame_bgr
         if frame is not None:
@@ -874,9 +1098,28 @@ class E88QtControllerWindow(QMainWindow):
                 (255, 255, 0),
                 2,
             )
+            cv2.putText(
+                view,
+                f"dt_total {t.dt_total_ms:.1f}ms dt_flow {t.dt_flow_ms:.1f}ms age {t.frame_age_ms:.1f}ms",
+                (10, 120),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (180, 180, 180),
+                2,
+            )
             self._show_frame(view, rotate_90_cw=False)
 
         self.traj_widget.add_sample(x_px=t.pos_x_px, y_px=t.pos_y_px, cmd_roll=t.cmd_roll, cmd_pitch=t.cmd_pitch)
+
+    def _save_sign_verification(self) -> None:
+        w = self._autopilot_worker
+        if w is None:
+            return
+        w.update_sign_verification(
+            flow_state=int(self.sign_flow_cb.checkState()),
+            control_state=int(self.sign_control_cb.checkState()),
+            notes=str(self.sign_notes_edit.text()),
+        )
 
     def _decay_to_center(self, v: int) -> int:
         if v > 128:

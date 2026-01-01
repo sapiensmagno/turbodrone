@@ -303,7 +303,7 @@
    - bound `Δcmd_roll/sec` and `Δcmd_pitch/sec`
  - Latency-aware gating:
    - if `estimated_latency_ms` exceeds threshold → degrade
-   - if `frame_age_ms` exceeds threshold (when measurable) → degrade/gate
+   - if `estimated_frame_age_ms` exceeds threshold (when measurable) → degrade/gate
  - Implement abort/land triggers:
    - quality collapse
    - saturation persistence
@@ -336,8 +336,8 @@
  - Make behavior consistent across a range of low altitudes.
  
  ### Strategy
- - Use a printable pad with high-frequency texture.
- - Add a marker on the pad (not the drone) to estimate altitude (visual altimeter).
+ - Use a printable pad with high-frequency texture, a central marker, and known physical size.
+ - Use the pad to estimate altitude (visual altimeter) based on its known physical size.
  - Remove scale ambiguity by either:
    - converting velocity from px/s to m/s (preferred), or
    - gain scheduling using altitude.

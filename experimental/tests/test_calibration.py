@@ -59,6 +59,8 @@ class TestStationaryCalibration(unittest.TestCase):
                     quality=1.0,
                     n_features=100,
                     n_tracked=100,
+                    inlier_ratio=1.0,
+                    fallback_used=False,
                 )
 
         orig = calib.LucasKanadeDriftEstimator

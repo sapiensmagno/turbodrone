@@ -18,6 +18,8 @@ class FlowEstimate:
     quality: float
     n_features: int
     n_tracked: int
+    inlier_ratio: float
+    fallback_used: bool
 
 
 @dataclass(frozen=True)
@@ -126,6 +128,8 @@ class LucasKanadeDriftEstimator:
                     quality=float(quality),
                     n_features=0,
                     n_tracked=0,
+                    inlier_ratio=0.0,
+                    fallback_used=True,
                 )
 
             self._initialize(gray)
@@ -191,6 +195,8 @@ class LucasKanadeDriftEstimator:
                     quality=float(quality),
                     n_features=n_features,
                     n_tracked=n_tracked,
+                    inlier_ratio=float(inlier_ratio),
+                    fallback_used=True,
                 )
 
             self._initialize(gray)
@@ -232,6 +238,8 @@ class LucasKanadeDriftEstimator:
             quality=quality,
             n_features=n_features,
             n_tracked=n_tracked,
+            inlier_ratio=float(inlier_ratio),
+            fallback_used=False,
         )
 
     def _initialize(self, gray: np.ndarray) -> None:
