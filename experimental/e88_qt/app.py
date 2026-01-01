@@ -597,6 +597,14 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_frame_age_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("frame age", self.diag_frame_age_label)
 
+        self.diag_frame_stale_label = QLabel("-")
+        self.diag_frame_stale_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("frame stale", self.diag_frame_stale_label)
+
+        self.diag_frames_dropped_label = QLabel("-")
+        self.diag_frames_dropped_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("frames dropped", self.diag_frames_dropped_label)
+
         self.diag_latency_label = QLabel("-")
         self.diag_latency_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("est latency", self.diag_latency_label)
@@ -1031,6 +1039,8 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_dt_total_label.setText(f"{float(t.dt_total_ms):.1f} ms")
         self.diag_dt_flow_label.setText(f"{float(t.dt_flow_ms):.1f} ms")
         self.diag_frame_age_label.setText(f"{float(t.frame_age_ms):.1f} ms")
+        self.diag_frame_stale_label.setText(f"{float(t.frame_stale_ms):.1f} ms")
+        self.diag_frames_dropped_label.setText(f"{int(t.frames_dropped)}")
         self.diag_latency_label.setText(f"{float(t.estimated_latency_ms):.1f} ms")
 
         if t.flow is None:
@@ -1100,7 +1110,7 @@ class E88QtControllerWindow(QMainWindow):
             )
             cv2.putText(
                 view,
-                f"dt_total {t.dt_total_ms:.1f}ms dt_flow {t.dt_flow_ms:.1f}ms age {t.frame_age_ms:.1f}ms",
+                f"dt_total {t.dt_total_ms:.1f}ms dt_flow {t.dt_flow_ms:.1f}ms age {t.frame_age_ms:.1f}ms stale {t.frame_stale_ms:.1f}ms drop {int(t.frames_dropped)}",
                 (10, 120),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
