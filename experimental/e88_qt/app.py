@@ -41,6 +41,7 @@ from PyQt5.QtCore import Qt, QThread, QTimer
 from PyQt5.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -389,24 +390,26 @@ class E88QtControllerWindow(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
 
-        self.image_label = QLabel(self)
-        self.image_label.setFixedSize(640, 480)
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background-color: black; border: 1px solid gray;")
-        self.image_label.setText("Loading RTSP stream...")
-        self.layout.addWidget(self.image_label, alignment=Qt.AlignCenter)
-
         top_row = QHBoxLayout()
 
         self.cam1_button = QPushButton("Cam 1")
         self.cam1_button.setFixedSize(100, 40)
-        self.cam1_button.clicked.connect(lambda: self._drone.switch_camera(1))
+        self.cam1_button.setCheckable(True)
         top_row.addWidget(self.cam1_button)
 
         self.cam2_button = QPushButton("Cam 2")
         self.cam2_button.setFixedSize(100, 40)
-        self.cam2_button.clicked.connect(lambda: self._drone.switch_camera(2))
+        self.cam2_button.setCheckable(True)
         top_row.addWidget(self.cam2_button)
+
+        self._cam_button_group = QButtonGroup(self)
+        self._cam_button_group.setExclusive(True)
+        self._cam_button_group.addButton(self.cam1_button)
+        self._cam_button_group.addButton(self.cam2_button)
+        self._selected_cam = 1
+        self.cam1_button.setChecked(True)
+        self.cam1_button.clicked.connect(lambda: self._select_camera(1))
+        self.cam2_button.clicked.connect(lambda: self._select_camera(2))
 
         self.autopilot_start_button = QPushButton("Start autostabilizer")
         self.autopilot_start_button.setFixedSize(160, 40)
@@ -424,6 +427,11 @@ class E88QtControllerWindow(QMainWindow):
         self.calibrate_button.clicked.connect(self._start_calibration)
         top_row.addWidget(self.calibrate_button)
 
+        self.gyro_calib_button = QPushButton("Calibrate gyro")
+        self.gyro_calib_button.setFixedSize(140, 40)
+        self.gyro_calib_button.clicked.connect(self._calibrate_gyro)
+        top_row.addWidget(self.gyro_calib_button)
+
         self.autopilot_stop_button = QPushButton("Stop autostabilizer")
         self.autopilot_stop_button.setFixedSize(160, 40)
         self.autopilot_stop_button.clicked.connect(self._stop_autopilot)
@@ -432,6 +440,20 @@ class E88QtControllerWindow(QMainWindow):
 
         top_row.addStretch(1)
         self.layout.addLayout(top_row)
+
+        video_row = QHBoxLayout()
+
+        self.traj_widget = _TrajectoryWidget(self)
+        video_row.addWidget(self.traj_widget)
+
+        self.image_label = QLabel(self)
+        self.image_label.setFixedSize(640, 480)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("background-color: black; border: 1px solid gray;")
+        self.image_label.setText("Loading RTSP stream...")
+        video_row.addWidget(self.image_label, alignment=Qt.AlignCenter)
+
+        self.layout.addLayout(video_row)
 
         bottom_row = QHBoxLayout()
 
@@ -658,9 +680,6 @@ class E88QtControllerWindow(QMainWindow):
 
         bottom_row.addWidget(self.diagnostics_group)
 
-        self.traj_widget = _TrajectoryWidget(self)
-        bottom_row.addWidget(self.traj_widget)
-
         self.layout.addLayout(bottom_row)
 
         self.status_label = QLabel("")
@@ -690,6 +709,7 @@ class E88QtControllerWindow(QMainWindow):
         if saved is not None:
             self.cfg_sigma_v.setValue(float(saved.kalman_sigma_v))
             self.cfg_est_deadband.setValue(float(saved.estimator_deadband_px_s))
+            self.cfg_deadband.setValue(float(saved.estimator_deadband_px_s))
             self.status_label.setText(
                 f"Loaded calibration: est_deadband {saved.estimator_deadband_px_s:.2f} px/s, sigma_v {saved.kalman_sigma_v:.2f}"
             )
@@ -770,7 +790,7 @@ class E88QtControllerWindow(QMainWindow):
             event.accept()
             return
         if key == Qt.Key_C:
-            self._drone.calibrate()
+            self._calibrate_gyro()
             event.accept()
             return
         if key == Qt.Key_F:
@@ -917,6 +937,9 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_stop_button.setEnabled(self._autopilot_running)
         self.autopilot_cfg_group.setEnabled(not self._autopilot_running)
         self.calibrate_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.gyro_calib_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.cam1_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.cam2_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
 
     def _set_calibration_running(self, running: bool) -> None:
         self._calibration_running = bool(running)
@@ -924,6 +947,31 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_stop_button.setEnabled(self._autopilot_running and (not self._calibration_running))
         self.autopilot_cfg_group.setEnabled((not self._autopilot_running) and (not self._calibration_running))
         self.calibrate_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.gyro_calib_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.cam1_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.cam2_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+
+    def _calibrate_gyro(self) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        try:
+            self._drone.calibrate()
+            self.status_label.setText("Gyro calibration requested")
+        except Exception as e:
+            self.status_label.setText(f"Gyro calibration error: {type(e).__name__}: {e}")
+
+    def _select_camera(self, cam: int) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        cam = int(cam)
+        if cam not in (1, 2):
+            return
+        try:
+            self._drone.switch_camera(cam)
+            self._selected_cam = int(cam)
+            self.status_label.setText(f"Switched to Cam {cam}")
+        except Exception as e:
+            self.status_label.setText(f"Camera switch error: {type(e).__name__}: {e}")
 
     def _start_calibration(self) -> None:
         if self._autopilot_running:
@@ -960,9 +1008,11 @@ class E88QtControllerWindow(QMainWindow):
 
         prev_sigma_v = float(self.cfg_sigma_v.value())
         prev_est_db = float(self.cfg_est_deadband.value())
+        prev_db = float(self.cfg_deadband.value())
 
         self.cfg_sigma_v.setValue(float(r.kalman_sigma_v))
         self.cfg_est_deadband.setValue(float(r.estimator_deadband_px_s))
+        self.cfg_deadband.setValue(float(r.estimator_deadband_px_s))
 
         changed = []
         if abs(prev_sigma_v - float(r.kalman_sigma_v)) > 1e-6:
@@ -971,6 +1021,9 @@ class E88QtControllerWindow(QMainWindow):
         if abs(prev_est_db - float(r.estimator_deadband_px_s)) > 1e-6:
             changed.append("Estimator deadband")
             self._flash_widget(self.cfg_est_deadband)
+        if abs(prev_db - float(r.estimator_deadband_px_s)) > 1e-6:
+            changed.append("Deadband")
+            self._flash_widget(self.cfg_deadband)
 
         changed_str = "" if not changed else (" (updated: " + ", ".join(changed) + ")")
         self.status_label.setText(
