@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -347,7 +348,7 @@ class _TrajectoryWidget(QWidget):
 
 
 class E88QtControllerWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
         self.setWindowTitle("E88 Pro Controller")
@@ -365,7 +366,20 @@ class E88QtControllerWindow(QMainWindow):
         self._yaw = 128
 
         self._autopilot_worker: Optional[_AutostabilizerWorker] = None
+        self._last_autopilot: Optional[StabilizerTelemetry] = None
         self._autopilot_running = False
+
+        self._diag_window_sec = 1.0
+        self._diag_series = {
+            "dt_total_ms": deque(),
+            "dt_flow_ms": deque(),
+            "frame_age_ms": deque(),
+            "frame_stale_ms": deque(),
+            "estimated_latency_ms": deque(),
+            "loop_rate_hz": deque(),
+            "frame_rate_hz": deque(),
+        }
+        self._last_diag_update_t: Optional[float] = None
 
         self._calibration_worker: Optional[_CalibrationWorker] = None
         self._calibration_running = False
@@ -1026,7 +1040,7 @@ class E88QtControllerWindow(QMainWindow):
             return
 
         if w.session_dir is not None:
-            self.diag_session_label.setText(str(w.session_dir))
+            self.diag_session_label.setText(str(Path(w.session_dir).name))
         if w.net_rtt_ms is not None:
             self.diag_rtt_label.setText(f"{float(w.net_rtt_ms):.1f} ms")
 
@@ -1034,14 +1048,40 @@ class E88QtControllerWindow(QMainWindow):
         if t is None:
             return
 
-        self.diag_loop_rate_label.setText(f"{float(t.loop_rate_hz):.1f} Hz")
-        self.diag_frame_rate_label.setText(f"{float(t.frame_rate_hz):.1f} Hz")
-        self.diag_dt_total_label.setText(f"{float(t.dt_total_ms):.1f} ms")
-        self.diag_dt_flow_label.setText(f"{float(t.dt_flow_ms):.1f} ms")
-        self.diag_frame_age_label.setText(f"{float(t.frame_age_ms):.1f} ms")
-        self.diag_frame_stale_label.setText(f"{float(t.frame_stale_ms):.1f} ms")
-        self.diag_frames_dropped_label.setText(f"{int(t.frames_dropped)}")
-        self.diag_latency_label.setText(f"{float(t.estimated_latency_ms):.1f} ms")
+        now_m = float(time.monotonic())
+        cutoff = now_m - float(self._diag_window_sec)
+
+        def _push(k: str, v: float) -> None:
+            self._diag_series[k].append((now_m, float(v)))
+            while self._diag_series[k] and float(self._diag_series[k][0][0]) < cutoff:
+                self._diag_series[k].popleft()
+
+        def _avg(k: str, fallback: float) -> float:
+            items = self._diag_series[k]
+            if not items:
+                return float(fallback)
+            return float(sum(float(x[1]) for x in items) / float(len(items)))
+
+        _push("dt_total_ms", float(t.dt_total_ms))
+        _push("dt_flow_ms", float(t.dt_flow_ms))
+        _push("frame_age_ms", float(t.frame_age_ms))
+        _push("frame_stale_ms", float(t.frame_stale_ms))
+        _push("estimated_latency_ms", float(t.estimated_latency_ms))
+        _push("loop_rate_hz", float(t.loop_rate_hz))
+        _push("frame_rate_hz", float(t.frame_rate_hz))
+
+        diag_update_period = 0.2
+        if self._last_diag_update_t is None or (now_m - float(self._last_diag_update_t)) >= diag_update_period:
+            self._last_diag_update_t = float(now_m)
+
+            self.diag_loop_rate_label.setText(f"{_avg('loop_rate_hz', t.loop_rate_hz):.1f} Hz")
+            self.diag_frame_rate_label.setText(f"{_avg('frame_rate_hz', t.frame_rate_hz):.1f} Hz")
+            self.diag_dt_total_label.setText(f"{_avg('dt_total_ms', t.dt_total_ms):.1f} ms")
+            self.diag_dt_flow_label.setText(f"{_avg('dt_flow_ms', t.dt_flow_ms):.1f} ms")
+            self.diag_frame_age_label.setText(f"{_avg('frame_age_ms', t.frame_age_ms):.1f} ms")
+            self.diag_frame_stale_label.setText(f"{_avg('frame_stale_ms', t.frame_stale_ms):.1f} ms")
+            self.diag_frames_dropped_label.setText(f"{int(t.frames_dropped)}")
+            self.diag_latency_label.setText(f"{_avg('estimated_latency_ms', t.estimated_latency_ms):.1f} ms")
 
         if t.flow is None:
             self.diag_quality_label.setText("-")
@@ -1071,51 +1111,55 @@ class E88QtControllerWindow(QMainWindow):
                     rx1, ry1 = int(h0 - 1 - float(y1)), int(float(x1))
                     cv2.line(view, (rx0, ry0), (rx1, ry1), c, 1)
                     cv2.circle(view, (rx1, ry1), 2, c, -1)
+            dt_total_ms = float(_avg("dt_total_ms", t.dt_total_ms))
+            dt_flow_ms = float(_avg("dt_flow_ms", t.dt_flow_ms))
+            frame_age_ms = float(_avg("frame_age_ms", t.frame_age_ms))
+            frame_stale_ms = float(_avg("frame_stale_ms", t.frame_stale_ms))
 
             cv2.putText(
                 view,
                 f"phase {t.phase} q {(t.flow.quality if t.flow is not None else 0.0):.2f}",
                 (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.55,
                 (0, 255, 0),
-                2,
+                1,
             )
             cv2.putText(
                 view,
                 f"vx {t.used_vx_px_s:+.1f} vy {t.used_vy_px_s:+.1f} px/s",
                 (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.55,
                 (0, 255, 0),
-                2,
+                1,
             )
             cv2.putText(
                 view,
                 f"kf_in vx {t.kf_input_vx_px_s:+.1f} vy {t.kf_input_vy_px_s:+.1f} gated {int(bool(t.kf_gated))}",
                 (10, 70),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                0.5,
                 (0, 255, 0),
-                2,
+                1,
             )
             cv2.putText(
                 view,
                 f"cmd roll {t.cmd_roll:+.2f} pitch {t.cmd_pitch:+.2f} thr {t.cmd_throttle:.1f}",
                 (10, 95),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                0.5,
                 (255, 255, 0),
-                2,
+                1,
             )
             cv2.putText(
                 view,
-                f"dt_total {t.dt_total_ms:.1f}ms dt_flow {t.dt_flow_ms:.1f}ms age {t.frame_age_ms:.1f}ms stale {t.frame_stale_ms:.1f}ms drop {int(t.frames_dropped)}",
+                f"dt_total {dt_total_ms:.1f}ms dt_flow {dt_flow_ms:.1f}ms age {frame_age_ms:.1f}ms stale {frame_stale_ms:.1f}ms drop {int(t.frames_dropped)}",
                 (10, 120),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.45,
                 (180, 180, 180),
-                2,
+                1,
             )
             self._show_frame(view, rotate_90_cw=False)
 
