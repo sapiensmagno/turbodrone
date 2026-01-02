@@ -449,6 +449,22 @@ Timing fields:
 - `dt_total_ms`: time from loop start until command send.
 - `estimated_latency_ms`: coarse estimate of sensor-to-command latency computed as `(t_cmd_sent - frame_timestamp)`.
 
+Frame freshness fields:
+
+- `frame_age_ms`: `t_flow_start - timestamp`.
+  - Uses the frame’s own `timestamp` (as provided by the frame source) and measures how “old” the image is by the time we start optical flow.
+  - Includes camera/transport/decode delay *and* any time waiting in the buffer before use.
+- `frame_stale_ms`: `t_flow_start - t_frame_received`.
+  - Uses the time when the background frame thread received/decoded the frame and placed it in the size-1 buffer.
+  - Mostly measures *how long the latest decoded frame sat around before the control loop used it*.
+
+In general you should expect `frame_age_ms >= frame_stale_ms`.
+
+Interpretation:
+
+- If `frame_age_ms` is large but `frame_stale_ms` is small, the delay is mostly upstream (camera/RTSP/decode).
+- If `frame_stale_ms` is large, the control loop is falling behind consumption (or frames are not arriving).
+
 Kalman conditioning fields:
 
 - `kf_input_vx_px_s`, `kf_input_vy_px_s`: the conditioned velocity actually fed into the Kalman update.
@@ -468,6 +484,18 @@ In the Qt UI:
 - `dt_total_ms` is the overall time spent in the control iteration until the command is sent.
 
 If `dt_total_ms` grows, the controller becomes sluggish even if `dt_flow_ms` stays small.
+
+**Loop and frame jitter (`loop_dt_ms_std`, `frame_dt_ms_std`)**
+
+The UI also reports two “jitter” metrics computed over the rolling diagnostics window (~1s):
+
+- `loop_dt_ms_std`: standard deviation of `Δt_loop_start`.
+  - Measures how much the *control loop period* varies.
+  - High values indicate scheduling jitter (UI thread load, Python runtime/GIL effects, sleeping granularity).
+
+- `frame_dt_ms_std`: standard deviation of `Δt_frame_received` (for *new* frames only).
+  - Measures how bursty/unstable frame delivery is.
+  - High values usually indicate RTSP/network/decode irregularities.
 
 **`kf_in` and `gated`**
 
