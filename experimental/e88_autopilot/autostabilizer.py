@@ -125,6 +125,7 @@ class LatestFrameBuffer:
         self._seq = 0
         self._last_read_seq = 0
         self._dropped_total = 0
+        self._last_source_ts: Optional[float] = None
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -168,10 +169,16 @@ class LatestFrameBuffer:
                 continue
 
             frame, ts = item
+            ts_f = float(ts)
+            last_ts = self._last_source_ts
+            if last_ts is not None and ts_f <= float(last_ts) + 1e-9:
+                time.sleep(0.001)
+                continue
+            self._last_source_ts = float(ts_f)
             t_received = float(time.monotonic())
             with self._lock:
                 self._seq += 1
-                self._latest = (frame, float(ts), float(t_received), int(self._seq))
+                self._latest = (frame, float(ts_f), float(t_received), int(self._seq))
 
 
 class AutoStabilizer:

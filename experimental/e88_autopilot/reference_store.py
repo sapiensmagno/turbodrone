@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -163,6 +164,20 @@ class ReferenceStore:
             calibration_ref_size_px=float(calibration_ref_size_px),
         )
         self.save(updated)
+
+    def delete(self, reference_id: str) -> None:
+        d = self._record_dir(reference_id)
+        try:
+            d_rel = d.resolve().relative_to(self._base_dir.resolve())
+        except Exception as e:
+            raise ValueError(f"invalid reference_id path: {reference_id}") from e
+        if not str(d_rel):
+            raise ValueError(f"refusing to delete base_dir: {reference_id}")
+        if not d.exists():
+            return
+        if not d.is_dir():
+            raise ValueError(f"reference is not a directory: {reference_id}")
+        shutil.rmtree(d)
 
     def _record_dir(self, reference_id: str) -> Path:
         return self._base_dir / str(reference_id)

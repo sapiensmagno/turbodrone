@@ -37,7 +37,7 @@ _load_dotenv()
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt, QThread, QTimer
+from PyQt5.QtCore import Qt, QSettings, QThread, QTimer
 from PyQt5.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -417,6 +417,8 @@ class E88QtControllerWindow(QMainWindow):
         self._calibration_running = False
         self._calibration_started_at = 0.0
 
+        self._settings = QSettings("turbodrone", "e88_qt")
+
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.layout = QVBoxLayout(self.central_widget)
@@ -625,16 +627,15 @@ class E88QtControllerWindow(QMainWindow):
         self.visual_scale_group = QGroupBox("Visual Scale")
         self.visual_scale_form = QFormLayout(self.visual_scale_group)
 
-        self.cfg_enable_visual_scale = QCheckBox()
-        self.cfg_enable_visual_scale.setChecked(bool(cfg_defaults.enable_visual_scale))
-        self.visual_scale_form.addRow("Enable", self.cfg_enable_visual_scale)
-
         ref_row = QHBoxLayout()
         self.cfg_reference_id = QComboBox()
         self.cfg_reference_reload = QPushButton("Reload")
         self.cfg_reference_reload.clicked.connect(self._reload_references)
+        self.cfg_reference_delete = QPushButton("Delete")
+        self.cfg_reference_delete.clicked.connect(self._delete_selected_reference)
         ref_row.addWidget(self.cfg_reference_id)
         ref_row.addWidget(self.cfg_reference_reload)
+        ref_row.addWidget(self.cfg_reference_delete)
         self.visual_scale_form.addRow("Reference", ref_row)
 
         self.cfg_use_m_s_control = QCheckBox()
@@ -839,7 +840,23 @@ class E88QtControllerWindow(QMainWindow):
                 f"Loaded calibration: est_deadband {saved.estimator_deadband_px_s:.2f} px/s, sigma_v {saved.kalman_sigma_v:.2f}"
             )
 
-        self._reload_references()
+        last_ref = str(self._settings.value("visual_scale/last_reference_id", "") or "").strip()
+        self._reload_references(select_id=(None if not last_ref else last_ref))
+
+        self.cfg_reference_id.currentIndexChanged.connect(self._on_reference_selected)
+        self._on_reference_selected()
+
+    @staticmethod
+    def _format_reference_label(r) -> str:
+        ts = float(getattr(r, "created_at_ts", 0.0))
+        try:
+            prefix = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        except Exception:
+            prefix = "unknown_time"
+        rid = str(getattr(r, "reference_id", ""))
+        suffix = rid[-6:] if len(rid) >= 6 else rid
+        calib = "calib" if (r.calibration_height_m is not None and r.calibration_ref_size_px is not None) else "no_calib"
+        return f"{prefix} {r.pad_type} {r.pad_width_m:.2f}x{r.pad_height_m:.2f}m {calib} ({suffix})"
 
     def _selected_reference_id(self) -> Optional[str]:
         try:
@@ -858,9 +875,10 @@ class E88QtControllerWindow(QMainWindow):
             self.cfg_reference_id.clear()
             self.cfg_reference_id.addItem("(none)", None)
             store = ReferenceStore()
-            for r in store.list():
-                label = f"{r.reference_id[:8]} {r.pad_type} {r.pad_width_m:.2f}x{r.pad_height_m:.2f}m"
-                self.cfg_reference_id.addItem(str(label), str(r.reference_id))
+            refs = list(store.list())
+            refs.sort(key=lambda x: float(x.created_at_ts), reverse=True)
+            for r in refs:
+                self.cfg_reference_id.addItem(str(self._format_reference_label(r)), str(r.reference_id))
 
             pick = select_id
             if pick is None:
@@ -872,6 +890,59 @@ class E88QtControllerWindow(QMainWindow):
                         break
         finally:
             self.cfg_reference_id.blockSignals(False)
+
+        self._on_reference_selected()
+
+    def _on_reference_selected(self, *_args) -> None:
+        ref_id = self._selected_reference_id()
+        self._settings.setValue("visual_scale/last_reference_id", "" if ref_id is None else str(ref_id))
+
+        if ref_id is None:
+            self.ref_status_label.setText("-")
+            return
+
+        store = ReferenceStore()
+        record = store.load(ref_id)
+        if record is None:
+            self.ref_status_label.setText("-")
+            return
+
+        if record.calibration_height_m is not None:
+            try:
+                self.ref_calib_height_m.setValue(float(record.calibration_height_m))
+            except Exception:
+                pass
+
+        if record.calibration_height_m is not None and record.calibration_ref_size_px is not None:
+            self.ref_status_label.setText(
+                f"Selected {ref_id}: calibrated height={float(record.calibration_height_m):.2f}m ref_size_px={float(record.calibration_ref_size_px):.1f}"
+            )
+        else:
+            self.ref_status_label.setText(f"Selected {ref_id}: not calibrated")
+
+    def _delete_selected_reference(self, _checked: bool = False) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        ref_id = self._selected_reference_id()
+        if ref_id is None:
+            return
+        r = QMessageBox.question(
+            self,
+            "Delete reference",
+            f"Delete reference {ref_id}? This will remove it from disk.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if r != QMessageBox.Yes:
+            return
+        try:
+            ReferenceStore().delete(ref_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Delete reference", f"Failed to delete: {type(e).__name__}: {e}")
+            return
+
+        self._settings.setValue("visual_scale/last_reference_id", "")
+        self._reload_references(select_id=None)
 
     def _capture_reference_from_camera(self) -> None:
         if self._autopilot_running or self._calibration_running:
@@ -1123,7 +1194,7 @@ class E88QtControllerWindow(QMainWindow):
             estimator_deadband_px_s=float(self.cfg_est_deadband.value()),
             roll_sign=float(self.cfg_roll_sign.value()),
             pitch_sign=float(self.cfg_pitch_sign.value()),
-            enable_visual_scale=bool(self.cfg_enable_visual_scale.isChecked()),
+            enable_visual_scale=True,
             reference_id=self._selected_reference_id(),
             use_m_s_control=bool(self.cfg_use_m_s_control.isChecked()),
         )
@@ -1132,6 +1203,29 @@ class E88QtControllerWindow(QMainWindow):
         if self._autopilot_worker is not None and self._autopilot_worker.isRunning():
             return
         if self._calibration_running:
+            return
+
+        ref_id = self._selected_reference_id()
+        if ref_id is None:
+            QMessageBox.warning(
+                self,
+                "Autostabilizer",
+                "Select a Reference and calibrate altitude before starting autostabilizer.",
+            )
+            return
+
+        store = ReferenceStore()
+        record = store.load(ref_id)
+        if record is None:
+            QMessageBox.warning(self, "Autostabilizer", "Failed to load selected reference.")
+            return
+
+        if record.calibration_height_m is None or record.calibration_ref_size_px is None:
+            QMessageBox.warning(
+                self,
+                "Autostabilizer",
+                "Selected Reference is not calibrated. Click 'Calibrate altitude' first.",
+            )
             return
 
         cfg = self._build_cfg()
@@ -1355,6 +1449,13 @@ class E88QtControllerWindow(QMainWindow):
         if t is None:
             return
 
+        vx_ms = getattr(t, "used_vx_m_s", None)
+        vy_ms = getattr(t, "used_vy_m_s", None)
+        if vx_ms is None:
+            vx_ms = getattr(t, "vx_m_s", None)
+        if vy_ms is None:
+            vy_ms = getattr(t, "vy_m_s", None)
+
         now_m = float(time.monotonic())
         cutoff = now_m - float(self._diag_window_sec)
 
@@ -1436,42 +1537,39 @@ class E88QtControllerWindow(QMainWindow):
                 self.diag_drop_pct_label.setText(f"{drop_pct_win:.1f} % (cum {drop_pct_cum:.1f} %)")
             self.diag_latency_label.setText(f"{_avg('estimated_latency_ms', t.estimated_latency_ms):.1f} ms")
 
-        if t.flow is None:
-            self.diag_quality_label.setText("-")
-            self.diag_features_label.setText("-")
-            self.diag_inlier_label.setText("-")
-            self.diag_fallback_label.setText("-")
-        else:
-            self.diag_quality_label.setText(f"{float(t.flow.quality):.2f}")
-            self.diag_features_label.setText(f"{int(t.flow.n_tracked)}/{int(t.flow.n_features)}")
-            self.diag_inlier_label.setText(f"{float(t.flow.inlier_ratio):.2f}")
-            self.diag_fallback_label.setText("1" if bool(t.flow.fallback_used) else "0")
-
-        if t.altitude_est_m is None:
-            self.diag_altitude_label.setText("-")
-        else:
-            self.diag_altitude_label.setText(f"{float(t.altitude_est_m):.2f} m ({str(t.altitude_source)})")
-
-        self.diag_scale_stable_label.setText("1" if bool(t.scale_stable) else "0")
-
-        vx_ms = t.used_vx_m_s if t.used_vx_m_s is not None else t.vx_m_s
-        vy_ms = t.used_vy_m_s if t.used_vy_m_s is not None else t.vy_m_s
-        if vx_ms is None or vy_ms is None:
-            self.diag_vel_ms_label.setText("-")
-        else:
-            self.diag_vel_ms_label.setText(f"vx {float(vx_ms):+.3f}  vy {float(vy_ms):+.3f}")
-
-        if not bool(t.ref_detected):
-            vs_err = str(getattr(t, "visual_scale_error", ""))
-            vs_on = bool(getattr(t, "visual_scale_enabled", False))
-            if vs_on and vs_err:
-                self.diag_ref_stats_label.setText(f"err {vs_err}")
+            if t.flow is None:
+                self.diag_quality_label.setText("-")
+                self.diag_features_label.setText("-")
+                self.diag_inlier_label.setText("-")
+                self.diag_fallback_label.setText("-")
             else:
-                self.diag_ref_stats_label.setText("-")
-        else:
-            self.diag_ref_stats_label.setText(
-                f"{str(t.ref_mode)} inl {float(t.ref_inlier_ratio):.2f} err {float(t.ref_reproj_error_px):.1f} px"
-            )
+                self.diag_quality_label.setText(f"{float(t.flow.quality):.2f}")
+                self.diag_features_label.setText(f"{int(t.flow.n_tracked)}/{int(t.flow.n_features)}")
+                self.diag_inlier_label.setText(f"{float(t.flow.inlier_ratio):.2f}")
+                self.diag_fallback_label.setText("1" if bool(t.flow.fallback_used) else "0")
+
+            if t.altitude_est_m is None:
+                self.diag_altitude_label.setText("-")
+            else:
+                self.diag_altitude_label.setText(f"{float(t.altitude_est_m):.2f} m ({str(t.altitude_source)})")
+
+            self.diag_scale_stable_label.setText("1" if bool(t.scale_stable) else "0")
+            if vx_ms is None or vy_ms is None:
+                self.diag_vel_ms_label.setText("-")
+            else:
+                self.diag_vel_ms_label.setText(f"vx {float(vx_ms):+.3f}  vy {float(vy_ms):+.3f}")
+
+            if not bool(t.ref_detected):
+                vs_err = str(getattr(t, "visual_scale_error", ""))
+                vs_on = bool(getattr(t, "visual_scale_enabled", False))
+                if vs_on and vs_err:
+                    self.diag_ref_stats_label.setText(f"err {vs_err}")
+                else:
+                    self.diag_ref_stats_label.setText("-")
+            else:
+                self.diag_ref_stats_label.setText(
+                    f"{str(t.ref_mode)} inl {float(t.ref_inlier_ratio):.2f} err {float(t.ref_reproj_error_px):.1f} px"
+                )
 
         frame = t.frame_bgr
         if frame is not None:
