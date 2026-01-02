@@ -12,6 +12,8 @@ from e88_autopilot.kalman import VelocityKalman2D
 from e88_autopilot.kalman import KalmanEstimate
 from e88_autopilot.measurement_conditioner import VelocityMeasurementConditioner
 from e88_autopilot.optical_flow import FlowEstimate, FlowTracks, LucasKanadeDriftEstimator
+from e88_autopilot.reference_store import ReferenceStore
+from e88_autopilot.visual_scale import VisualScaleEstimator
 from turbodrone import Drone
 
 
@@ -42,6 +44,17 @@ class StabilizerConfig:
     estimator_deadband_px_s: float = 3.0
     roll_sign: float = -1.0
     pitch_sign: float = -1.0
+
+    enable_visual_scale: bool = False
+    reference_id: Optional[str] = None
+    use_m_s_control: bool = True
+    kp_vx_m_s: float = 1.5
+    kp_vy_m_s: float = 1.5
+    ki_vx_m_s: float = 0.25
+    ki_vy_m_s: float = 0.25
+    deadband_m_s: float = 0.02
+    visual_scale_stable_frames: int = 8
+    visual_scale_max_ref_size_frac_per_sec: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -79,6 +92,24 @@ class StabilizerTelemetry:
     estimated_latency_ms: float = 0.0
     loop_rate_hz: float = 0.0
     frame_rate_hz: float = 0.0
+
+    altitude_est_m: Optional[float] = None
+    altitude_source: str = "unknown"
+    ref_detected: bool = False
+    ref_width_px: float = 0.0
+    ref_height_px: float = 0.0
+    ref_size_px: float = 0.0
+    ref_quad_xy: Optional[np.ndarray] = None
+    vx_m_s: Optional[float] = None
+    vy_m_s: Optional[float] = None
+    used_vx_m_s: Optional[float] = None
+    used_vy_m_s: Optional[float] = None
+    scale_stable: bool = False
+    ref_mode: str = ""
+    ref_n_matches: int = 0
+    ref_n_inliers: int = 0
+    ref_inlier_ratio: float = 0.0
+    ref_reproj_error_px: float = 0.0
 
 
 class LatestFrameBuffer:
@@ -159,7 +190,7 @@ class AutoStabilizer:
 
         self._meas_cond = VelocityMeasurementConditioner(deadband_px_s=self._cfg.estimator_deadband_px_s)
 
-        self._ctl = VelocityHoldController(
+        self._ctl_px = VelocityHoldController(
             min_quality=self._cfg.min_quality,
             max_cmd=self._cfg.max_cmd,
             kp_vx=self._cfg.kp_vx,
@@ -170,6 +201,20 @@ class AutoStabilizer:
             roll_sign=self._cfg.roll_sign,
             pitch_sign=self._cfg.pitch_sign,
         )
+
+        self._ctl_m = VelocityHoldController(
+            min_quality=self._cfg.min_quality,
+            max_cmd=self._cfg.max_cmd,
+            kp_vx=self._cfg.kp_vx_m_s,
+            kp_vy=self._cfg.kp_vy_m_s,
+            ki_vx=self._cfg.ki_vx_m_s,
+            ki_vy=self._cfg.ki_vy_m_s,
+            deadband_px_s=self._cfg.deadband_m_s,
+            roll_sign=self._cfg.roll_sign,
+            pitch_sign=self._cfg.pitch_sign,
+        )
+
+        self._visual_scale: Optional[VisualScaleEstimator] = None
 
         self._active = False
         self._last_loop_t: Optional[float] = None
@@ -184,7 +229,9 @@ class AutoStabilizer:
         self._flow.reset()
         if self._kf is not None:
             self._kf.reset()
-        self._ctl.reset()
+        self._ctl_px.reset()
+        self._ctl_m.reset()
+        self._init_visual_scale()
         self._last_loop_t = None
         self._loop_rate_hz_ema = 0.0
         self._frame_rate_hz_ema = 0.0
@@ -193,14 +240,28 @@ class AutoStabilizer:
         self._viz_x_px = 0.0
         self._viz_y_px = 0.0
 
-    def _update_rate_ema(self, *, prev: float, inst: float, alpha: float = 0.1) -> float:
-        i = float(inst)
-        if i <= 0.0 or not np.isfinite(i):
-            return float(prev)
-        if prev <= 0.0:
-            return float(i)
-        a = float(min(1.0, max(0.0, alpha)))
-        return float((1.0 - a) * float(prev) + a * i)
+    def _init_visual_scale(self) -> None:
+        self._visual_scale = None
+        if not bool(self._cfg.enable_visual_scale):
+            return
+        ref_id = self._cfg.reference_id
+        if ref_id is None or not str(ref_id).strip():
+            return
+
+        store = ReferenceStore()
+        record = store.load(str(ref_id))
+        if record is None:
+            return
+        img = store.load_image_bgr(str(ref_id))
+        if img is None:
+            return
+
+        self._visual_scale = VisualScaleEstimator(
+            record=record,
+            reference_image_bgr=img,
+            stable_required_frames=int(self._cfg.visual_scale_stable_frames),
+            max_ref_size_frac_per_sec=float(self._cfg.visual_scale_max_ref_size_frac_per_sec),
+        )
 
     def deactivate(self) -> None:
         self._active = False
@@ -219,6 +280,21 @@ class AutoStabilizer:
             sink(t)
         except Exception:
             pass
+
+    @staticmethod
+    def _update_rate_ema(*, prev: float, inst: float, alpha: float = 0.15) -> float:
+        p = float(prev)
+        x = float(inst)
+        a = float(alpha)
+        if not np.isfinite(x) or x <= 0.0:
+            return float(p)
+        if (not np.isfinite(p)) or p <= 0.0:
+            return float(x)
+        if (not np.isfinite(a)) or a <= 0.0:
+            return float(p)
+        if a >= 1.0:
+            return float(x)
+        return float((1.0 - a) * p + a * x)
 
     def run(self, *, duration_sec: Optional[float] = None) -> None:
         if not self._active:
@@ -542,10 +618,63 @@ class AutoStabilizer:
                     prev=self._frame_rate_hz_ema, inst=(1.0 / float(est.dt_sec))
                 )
 
-                out = self._ctl.update(dt_sec=est.dt_sec, vx_px_s=vx, vy_px_s=vy, quality=q)
+                scale = None
+                if self._visual_scale is not None:
+                    try:
+                        scale = self._visual_scale.update(
+                            frame_bgr=frame,
+                            timestamp=float(ts),
+                            vx_px_s=float(vx),
+                            vy_px_s=float(vy),
+                        )
+                    except Exception:
+                        scale = None
+
+                altitude_est_m = None if scale is None else scale.altitude_est_m
+                altitude_source = str("unknown" if scale is None else scale.altitude_source)
+                ref_detected = bool(False if scale is None else scale.ref_detected)
+                ref_width_px = float(0.0 if scale is None else scale.ref_width_px)
+                ref_height_px = float(0.0 if scale is None else scale.ref_height_px)
+                ref_size_px = float(0.0 if scale is None else scale.ref_size_px)
+                ref_quad_xy = None
+                if scale is not None and bool(scale.ref_detected) and scale.detection.quad_xy is not None:
+                    ref_quad_xy = np.asarray(scale.detection.quad_xy, dtype=np.float32).copy()
+                vx_m_s = None if scale is None else scale.vx_m_s
+                vy_m_s = None if scale is None else scale.vy_m_s
+                scale_stable = bool(False if scale is None else scale.stable)
+                ref_mode = str("") if scale is None else str(scale.detection.mode)
+                ref_n_matches = int(0 if scale is None else scale.detection.n_matches)
+                ref_n_inliers = int(0 if scale is None else scale.detection.n_inliers)
+                ref_inlier_ratio = float(0.0 if scale is None else scale.detection.inlier_ratio)
+                ref_reproj_error_px = float(0.0 if scale is None else scale.detection.reproj_error_px)
+
+                use_m_s = (
+                    bool(self._cfg.enable_visual_scale)
+                    and bool(self._cfg.use_m_s_control)
+                    and bool(scale_stable)
+                    and (vx_m_s is not None)
+                    and (vy_m_s is not None)
+                )
+
+                out = None
+                if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and use_m_s:
+                    out = self._ctl_m.update(
+                        dt_sec=est.dt_sec,
+                        vx_px_s=float(vx_m_s),
+                        vy_px_s=float(vy_m_s),
+                        quality=q,
+                    )
+                else:
+                    out = self._ctl_px.update(dt_sec=est.dt_sec, vx_px_s=vx, vy_px_s=vy, quality=q)
+
+                cmd_scale = 1.0
+                if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and (not use_m_s):
+                    cmd_scale = 0.35
                 t_ctrl_end = float(time.monotonic())
                 if out is None:
-                    self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
+                    cmd_roll = 0.0
+                    cmd_pitch = 0.0
+                    self._drone.send_cmd(roll=float(cmd_roll), pitch=float(cmd_pitch), throttle=self._cfg.base_throttle)
                     t_cmd_sent = float(time.monotonic())
                     self._emit(
                         StabilizerTelemetry(
@@ -562,8 +691,8 @@ class AutoStabilizer:
                             kf_input_vx_px_s=float(cond.vx_px_s),
                             kf_input_vy_px_s=float(cond.vy_px_s),
                             kf_gated=bool(cond.gated),
-                            cmd_roll=0.0,
-                            cmd_pitch=0.0,
+                            cmd_roll=float(cmd_roll),
+                            cmd_pitch=float(cmd_pitch),
                             cmd_throttle=float(self._cfg.base_throttle),
                             t_loop_start=float(t_loop_start),
                             t_frame_received=float(t_frame_received),
@@ -582,10 +711,29 @@ class AutoStabilizer:
                             estimated_latency_ms=float(max(0.0, (t_cmd_sent - float(ts)) * 1000.0)),
                             loop_rate_hz=float(self._loop_rate_hz_ema),
                             frame_rate_hz=float(self._frame_rate_hz_ema),
+                            altitude_est_m=None if altitude_est_m is None else float(altitude_est_m),
+                            altitude_source=str(altitude_source),
+                            ref_detected=bool(ref_detected),
+                            ref_width_px=float(ref_width_px),
+                            ref_height_px=float(ref_height_px),
+                            ref_size_px=float(ref_size_px),
+                            ref_quad_xy=ref_quad_xy,
+                            vx_m_s=None if vx_m_s is None else float(vx_m_s),
+                            vy_m_s=None if vy_m_s is None else float(vy_m_s),
+                            used_vx_m_s=None,
+                            used_vy_m_s=None,
+                            scale_stable=bool(scale_stable),
+                            ref_mode=str(ref_mode),
+                            ref_n_matches=int(ref_n_matches),
+                            ref_n_inliers=int(ref_n_inliers),
+                            ref_inlier_ratio=float(ref_inlier_ratio),
+                            ref_reproj_error_px=float(ref_reproj_error_px),
                         )
                     )
                 else:
-                    self._drone.send_cmd(roll=out.roll, pitch=out.pitch, throttle=self._cfg.base_throttle)
+                    cmd_roll = float(out.roll) * float(cmd_scale)
+                    cmd_pitch = float(out.pitch) * float(cmd_scale)
+                    self._drone.send_cmd(roll=float(cmd_roll), pitch=float(cmd_pitch), throttle=self._cfg.base_throttle)
                     t_cmd_sent = float(time.monotonic())
 
                     self._emit(
@@ -603,8 +751,8 @@ class AutoStabilizer:
                             kf_input_vx_px_s=float(cond.vx_px_s),
                             kf_input_vy_px_s=float(cond.vy_px_s),
                             kf_gated=bool(cond.gated),
-                            cmd_roll=float(out.roll),
-                            cmd_pitch=float(out.pitch),
+                            cmd_roll=float(cmd_roll),
+                            cmd_pitch=float(cmd_pitch),
                             cmd_throttle=float(self._cfg.base_throttle),
                             t_loop_start=float(t_loop_start),
                             t_frame_received=float(t_frame_received),
@@ -623,6 +771,23 @@ class AutoStabilizer:
                             estimated_latency_ms=float(max(0.0, (t_cmd_sent - float(ts)) * 1000.0)),
                             loop_rate_hz=float(self._loop_rate_hz_ema),
                             frame_rate_hz=float(self._frame_rate_hz_ema),
+                            altitude_est_m=None if altitude_est_m is None else float(altitude_est_m),
+                            altitude_source=str(altitude_source),
+                            ref_detected=bool(ref_detected),
+                            ref_width_px=float(ref_width_px),
+                            ref_height_px=float(ref_height_px),
+                            ref_size_px=float(ref_size_px),
+                            ref_quad_xy=ref_quad_xy,
+                            vx_m_s=None if vx_m_s is None else float(vx_m_s),
+                            vy_m_s=None if vy_m_s is None else float(vy_m_s),
+                            used_vx_m_s=None if (not use_m_s or vx_m_s is None) else float(vx_m_s),
+                            used_vy_m_s=None if (not use_m_s or vy_m_s is None) else float(vy_m_s),
+                            scale_stable=bool(scale_stable),
+                            ref_mode=str(ref_mode),
+                            ref_n_matches=int(ref_n_matches),
+                            ref_n_inliers=int(ref_n_inliers),
+                            ref_inlier_ratio=float(ref_inlier_ratio),
+                            ref_reproj_error_px=float(ref_reproj_error_px),
                         )
                     )
 

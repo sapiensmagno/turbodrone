@@ -43,13 +43,16 @@ from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QShortcut,
     QSpinBox,
@@ -59,6 +62,8 @@ from PyQt5.QtWidgets import (
 
 from e88_autopilot.calibration import load_calibration, run_stationary_calibration, save_calibration
 from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig, StabilizerTelemetry
+from e88_autopilot.reference_store import ReferenceStore
+from e88_autopilot.visual_scale import VisualScaleEstimator
 from e88_autopilot.session_recorder import SessionRecorder, build_default_meta, measure_icmp_ping_rtt_ms
 from e88.config import E88Config
 from turbodrone import Drone
@@ -201,6 +206,22 @@ class _AutostabilizerWorker(QThread):
             "estimated_latency_ms": float(t.estimated_latency_ms),
             "loop_rate_hz": float(t.loop_rate_hz),
             "frame_rate_hz": float(t.frame_rate_hz),
+            "altitude_est_m": None if t.altitude_est_m is None else float(t.altitude_est_m),
+            "altitude_source": str(t.altitude_source),
+            "ref_detected": bool(t.ref_detected),
+            "ref_width_px": float(t.ref_width_px),
+            "ref_height_px": float(t.ref_height_px),
+            "ref_size_px": float(t.ref_size_px),
+            "vx_m_s": None if t.vx_m_s is None else float(t.vx_m_s),
+            "vy_m_s": None if t.vy_m_s is None else float(t.vy_m_s),
+            "used_vx_m_s": None if t.used_vx_m_s is None else float(t.used_vx_m_s),
+            "used_vy_m_s": None if t.used_vy_m_s is None else float(t.used_vy_m_s),
+            "scale_stable": bool(t.scale_stable),
+            "ref_mode": str(t.ref_mode),
+            "ref_n_matches": int(t.ref_n_matches),
+            "ref_n_inliers": int(t.ref_n_inliers),
+            "ref_inlier_ratio": float(t.ref_inlier_ratio),
+            "ref_reproj_error_px": float(t.ref_reproj_error_px),
         }
 
     def pop_latest(self) -> Optional[StabilizerTelemetry]:
@@ -599,6 +620,77 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_calib_duration.setValue(10.0)
         self.autopilot_cfg_form_right.addRow("Calib duration (s)", self.cfg_calib_duration)
 
+        self.visual_scale_group = QGroupBox("Visual Scale")
+        self.visual_scale_form = QFormLayout(self.visual_scale_group)
+
+        self.cfg_enable_visual_scale = QCheckBox()
+        self.cfg_enable_visual_scale.setChecked(bool(cfg_defaults.enable_visual_scale))
+        self.visual_scale_form.addRow("Enable", self.cfg_enable_visual_scale)
+
+        ref_row = QHBoxLayout()
+        self.cfg_reference_id = QComboBox()
+        self.cfg_reference_reload = QPushButton("Reload")
+        self.cfg_reference_reload.clicked.connect(self._reload_references)
+        ref_row.addWidget(self.cfg_reference_id)
+        ref_row.addWidget(self.cfg_reference_reload)
+        self.visual_scale_form.addRow("Reference", ref_row)
+
+        self.cfg_use_m_s_control = QCheckBox()
+        self.cfg_use_m_s_control.setChecked(bool(cfg_defaults.use_m_s_control))
+        self.visual_scale_form.addRow("Use m/s control", self.cfg_use_m_s_control)
+
+        self.ref_pad_type = QLineEdit()
+        self.ref_pad_type.setText("pad")
+        self.visual_scale_form.addRow("Pad type", self.ref_pad_type)
+
+        self.ref_pad_width_m = QDoubleSpinBox()
+        self.ref_pad_width_m.setRange(0.01, 10.0)
+        self.ref_pad_width_m.setDecimals(3)
+        self.ref_pad_width_m.setValue(0.30)
+        self.visual_scale_form.addRow("Pad width (m)", self.ref_pad_width_m)
+
+        self.ref_pad_height_m = QDoubleSpinBox()
+        self.ref_pad_height_m.setRange(0.01, 10.0)
+        self.ref_pad_height_m.setDecimals(3)
+        self.ref_pad_height_m.setValue(0.30)
+        self.visual_scale_form.addRow("Pad height (m)", self.ref_pad_height_m)
+
+        self.ref_capture_height_m = QDoubleSpinBox()
+        self.ref_capture_height_m.setRange(0.01, 50.0)
+        self.ref_capture_height_m.setDecimals(2)
+        self.ref_capture_height_m.setValue(0.50)
+        self.visual_scale_form.addRow("Ref capture height (m)", self.ref_capture_height_m)
+
+        self.ref_markers_present = QCheckBox()
+        self.ref_markers_present.setChecked(False)
+        self.visual_scale_form.addRow("Markers present", self.ref_markers_present)
+
+        reg_row = QHBoxLayout()
+        self.ref_capture_btn = QPushButton("Capture")
+        self.ref_capture_btn.clicked.connect(self._capture_reference_from_camera)
+        self.ref_load_btn = QPushButton("From file")
+        self.ref_load_btn.clicked.connect(self._register_reference_from_file)
+        reg_row.addWidget(self.ref_capture_btn)
+        reg_row.addWidget(self.ref_load_btn)
+        self.visual_scale_form.addRow("Register", reg_row)
+
+        self.ref_calib_height_m = QDoubleSpinBox()
+        self.ref_calib_height_m.setRange(0.01, 50.0)
+        self.ref_calib_height_m.setDecimals(2)
+        self.ref_calib_height_m.setValue(0.50)
+        self.visual_scale_form.addRow("Calib height (m)", self.ref_calib_height_m)
+
+        self.ref_calib_btn = QPushButton("Calibrate altitude")
+        self.ref_calib_btn.clicked.connect(self._calibrate_reference_altitude)
+        self.visual_scale_form.addRow("", self.ref_calib_btn)
+
+        self.ref_status_label = QLabel("-")
+        self.ref_status_label.setTextFormat(Qt.PlainText)
+        self.visual_scale_form.addRow("Status", self.ref_status_label)
+
+        bottom_row.addWidget(self.autopilot_cfg_group)
+        bottom_row.addWidget(self.visual_scale_group)
+
         self.keyboard_help_group = QGroupBox("Keyboard")
         self.keyboard_help_label = QLabel()
         self.keyboard_help_label.setTextFormat(Qt.PlainText)
@@ -607,7 +699,6 @@ class E88QtControllerWindow(QMainWindow):
         help_layout.addWidget(self.keyboard_help_label)
         self._update_keyboard_help()
 
-        bottom_row.addWidget(self.autopilot_cfg_group)
         bottom_row.addWidget(self.keyboard_help_group)
 
         self.diagnostics_group = QGroupBox("Diagnostics")
@@ -677,6 +768,22 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_fallback_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("fallback", self.diag_fallback_label)
 
+        self.diag_altitude_label = QLabel("-")
+        self.diag_altitude_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("altitude", self.diag_altitude_label)
+
+        self.diag_scale_stable_label = QLabel("-")
+        self.diag_scale_stable_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("scale stable", self.diag_scale_stable_label)
+
+        self.diag_vel_ms_label = QLabel("-")
+        self.diag_vel_ms_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("vel (m/s)", self.diag_vel_ms_label)
+
+        self.diag_ref_stats_label = QLabel("-")
+        self.diag_ref_stats_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("ref stats", self.diag_ref_stats_label)
+
         self.sign_flow_cb = QCheckBox("Flow sign OK")
         self.sign_flow_cb.setTristate(True)
         self.sign_flow_cb.setCheckState(Qt.PartiallyChecked)
@@ -729,6 +836,130 @@ class E88QtControllerWindow(QMainWindow):
             self.status_label.setText(
                 f"Loaded calibration: est_deadband {saved.estimator_deadband_px_s:.2f} px/s, sigma_v {saved.kalman_sigma_v:.2f}"
             )
+
+        self._reload_references()
+
+    def _selected_reference_id(self) -> Optional[str]:
+        try:
+            v = self.cfg_reference_id.currentData()
+            if v is None:
+                return None
+            s = str(v).strip()
+            return None if not s else s
+        except Exception:
+            return None
+
+    def _reload_references(self, _checked: bool = False, *, select_id: Optional[str] = None) -> None:
+        prev = self._selected_reference_id()
+        self.cfg_reference_id.blockSignals(True)
+        try:
+            self.cfg_reference_id.clear()
+            self.cfg_reference_id.addItem("(none)", None)
+            store = ReferenceStore()
+            for r in store.list():
+                label = f"{r.reference_id[:8]} {r.pad_type} {r.pad_width_m:.2f}x{r.pad_height_m:.2f}m"
+                self.cfg_reference_id.addItem(str(label), str(r.reference_id))
+
+            pick = select_id
+            if pick is None:
+                pick = prev
+            if pick is not None:
+                for i in range(self.cfg_reference_id.count()):
+                    if str(self.cfg_reference_id.itemData(i)) == str(pick):
+                        self.cfg_reference_id.setCurrentIndex(i)
+                        break
+        finally:
+            self.cfg_reference_id.blockSignals(False)
+
+    def _capture_reference_from_camera(self) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        frame = self._drone.get_frame(timeout=1.0)
+        if frame is None:
+            QMessageBox.warning(self, "Reference", "No frame available from drone")
+            return
+        self._create_reference_from_image(frame_bgr=frame)
+
+    def _register_reference_from_file(self) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Select reference image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*)",
+        )
+        if not path:
+            return
+        img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if img is None:
+            QMessageBox.warning(self, "Reference", f"Failed to load image: {path}")
+            return
+        self._create_reference_from_image(frame_bgr=img)
+
+    def _create_reference_from_image(self, *, frame_bgr: np.ndarray) -> None:
+        store = ReferenceStore()
+        try:
+            r = store.create(
+                pad_type=str(self.ref_pad_type.text()).strip() or "pad",
+                pad_width_m=float(self.ref_pad_width_m.value()),
+                pad_height_m=float(self.ref_pad_height_m.value()),
+                reference_capture_height_m=float(self.ref_capture_height_m.value()),
+                markers_present=bool(self.ref_markers_present.isChecked()),
+                image_bgr=frame_bgr,
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Reference", f"Failed to create reference: {type(e).__name__}: {e}")
+            return
+
+        self.ref_status_label.setText(f"Created reference {r.reference_id}")
+        self._reload_references(select_id=str(r.reference_id))
+
+    def _calibrate_reference_altitude(self) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        ref_id = self._selected_reference_id()
+        if ref_id is None:
+            QMessageBox.warning(self, "Calibration", "Select a reference first")
+            return
+
+        store = ReferenceStore()
+        record = store.load(ref_id)
+        img = store.load_image_bgr(ref_id)
+        if record is None or img is None:
+            QMessageBox.warning(self, "Calibration", "Failed to load reference record/image")
+            return
+
+        frame = self._drone.get_frame(timeout=1.0)
+        if frame is None:
+            QMessageBox.warning(self, "Calibration", "No frame available from drone")
+            return
+
+        try:
+            est = VisualScaleEstimator(record=record, reference_image_bgr=img, stable_required_frames=1)
+            scale = est.update(frame_bgr=frame, timestamp=float(time.monotonic()), vx_px_s=0.0, vy_px_s=0.0)
+        except Exception as e:
+            QMessageBox.warning(self, "Calibration", f"Detection failed: {type(e).__name__}: {e}")
+            return
+
+        if not bool(scale.ref_detected) or float(scale.ref_size_px) <= 1e-6:
+            QMessageBox.warning(self, "Calibration", "Reference not detected in current frame")
+            return
+
+        try:
+            store.update_calibration(
+                ref_id,
+                calibration_height_m=float(self.ref_calib_height_m.value()),
+                calibration_ref_size_px=float(scale.ref_size_px),
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "Calibration", f"Failed to save calibration: {type(e).__name__}: {e}")
+            return
+
+        self.ref_status_label.setText(
+            f"Calibrated {ref_id}: height={float(self.ref_calib_height_m.value()):.2f}m ref_size_px={float(scale.ref_size_px):.1f}"
+        )
+        self._reload_references(select_id=str(ref_id))
 
     def closeEvent(self, event):
         try:
@@ -890,6 +1121,9 @@ class E88QtControllerWindow(QMainWindow):
             estimator_deadband_px_s=float(self.cfg_est_deadband.value()),
             roll_sign=float(self.cfg_roll_sign.value()),
             pitch_sign=float(self.cfg_pitch_sign.value()),
+            enable_visual_scale=bool(self.cfg_enable_visual_scale.isChecked()),
+            reference_id=self._selected_reference_id(),
+            use_m_s_control=bool(self.cfg_use_m_s_control.isChecked()),
         )
 
     def _start_autopilot(self) -> None:
@@ -952,6 +1186,7 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_start_button.setEnabled(not self._autopilot_running)
         self.autopilot_stop_button.setEnabled(self._autopilot_running)
         self.autopilot_cfg_group.setEnabled(not self._autopilot_running)
+        self.visual_scale_group.setEnabled(not self._autopilot_running)
         self.calibrate_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
         self.gyro_calib_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
         self.cam1_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
@@ -962,6 +1197,7 @@ class E88QtControllerWindow(QMainWindow):
         self.autopilot_start_button.setEnabled((not self._calibration_running) and (not self._autopilot_running))
         self.autopilot_stop_button.setEnabled(self._autopilot_running and (not self._calibration_running))
         self.autopilot_cfg_group.setEnabled((not self._autopilot_running) and (not self._calibration_running))
+        self.visual_scale_group.setEnabled((not self._autopilot_running) and (not self._calibration_running))
         self.calibrate_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
         self.gyro_calib_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
         self.cam1_button.setEnabled((not self._autopilot_running) and (not self._calibration_running))
@@ -1209,6 +1445,27 @@ class E88QtControllerWindow(QMainWindow):
             self.diag_inlier_label.setText(f"{float(t.flow.inlier_ratio):.2f}")
             self.diag_fallback_label.setText("1" if bool(t.flow.fallback_used) else "0")
 
+        if t.altitude_est_m is None:
+            self.diag_altitude_label.setText("-")
+        else:
+            self.diag_altitude_label.setText(f"{float(t.altitude_est_m):.2f} m ({str(t.altitude_source)})")
+
+        self.diag_scale_stable_label.setText("1" if bool(t.scale_stable) else "0")
+
+        vx_ms = t.used_vx_m_s if t.used_vx_m_s is not None else t.vx_m_s
+        vy_ms = t.used_vy_m_s if t.used_vy_m_s is not None else t.vy_m_s
+        if vx_ms is None or vy_ms is None:
+            self.diag_vel_ms_label.setText("-")
+        else:
+            self.diag_vel_ms_label.setText(f"vx {float(vx_ms):+.3f}  vy {float(vy_ms):+.3f}")
+
+        if not bool(t.ref_detected):
+            self.diag_ref_stats_label.setText("-")
+        else:
+            self.diag_ref_stats_label.setText(
+                f"{str(t.ref_mode)} inl {float(t.ref_inlier_ratio):.2f} err {float(t.ref_reproj_error_px):.1f} px"
+            )
+
         frame = t.frame_bgr
         if frame is not None:
             h0, w0 = frame.shape[:2]
@@ -1226,6 +1483,18 @@ class E88QtControllerWindow(QMainWindow):
                     rx1, ry1 = int(h0 - 1 - float(y1)), int(float(x1))
                     cv2.line(view, (rx0, ry0), (rx1, ry1), c, 1)
                     cv2.circle(view, (rx1, ry1), 2, c, -1)
+
+            quad = getattr(t, "ref_quad_xy", None)
+            if bool(t.ref_detected) and quad is not None:
+                try:
+                    q = np.asarray(quad, dtype=np.float32).reshape(4, 2)
+                    pts = []
+                    for (x, y) in q:
+                        pts.append([int(h0 - 1 - float(y)), int(float(x))])
+                    poly = np.asarray(pts, dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(view, [poly], isClosed=True, color=(0, 255, 0), thickness=2)
+                except Exception:
+                    pass
             dt_total_ms = float(_avg("dt_total_ms", t.dt_total_ms))
             dt_flow_ms = float(_avg("dt_flow_ms", t.dt_flow_ms))
             frame_age_ms = float(_avg("frame_age_ms", t.frame_age_ms))
@@ -1242,7 +1511,7 @@ class E88QtControllerWindow(QMainWindow):
             )
             cv2.putText(
                 view,
-                f"vx {t.used_vx_px_s:+.1f} vy {t.used_vy_px_s:+.1f} px/s",
+                "-" if (vx_ms is None or vy_ms is None) else f"vx {float(vx_ms):+.3f} vy {float(vy_ms):+.3f} m/s",
                 (10, 50),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
@@ -1251,7 +1520,7 @@ class E88QtControllerWindow(QMainWindow):
             )
             cv2.putText(
                 view,
-                f"kf_in vx {t.kf_input_vx_px_s:+.1f} vy {t.kf_input_vy_px_s:+.1f} gated {int(bool(t.kf_gated))}",
+                "alt -" if t.altitude_est_m is None else f"alt {float(t.altitude_est_m):.2f} m",
                 (10, 70),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -1260,8 +1529,17 @@ class E88QtControllerWindow(QMainWindow):
             )
             cv2.putText(
                 view,
+                f"kf_in vx {t.kf_input_vx_px_s:+.1f} vy {t.kf_input_vy_px_s:+.1f} px/s gated {int(bool(t.kf_gated))}",
+                (10, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 0),
+                1,
+            )
+            cv2.putText(
+                view,
                 f"cmd roll {t.cmd_roll:+.2f} pitch {t.cmd_pitch:+.2f} thr {t.cmd_throttle:.1f}",
-                (10, 95),
+                (10, 110),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (255, 255, 0),
@@ -1270,7 +1548,7 @@ class E88QtControllerWindow(QMainWindow):
             cv2.putText(
                 view,
                 f"dt_total {dt_total_ms:.1f}ms dt_flow {dt_flow_ms:.1f}ms age {frame_age_ms:.1f}ms stale {frame_stale_ms:.1f}ms drop {drop_pct_for_overlay:.1f}%",
-                (10, 120),
+                (10, 135),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
                 (180, 180, 180),

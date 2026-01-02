@@ -1,1 +1,4 @@
 /.venv*
+/e88_autopilot/sessions/
+/e88_autopilot/references/
+/e88_autopilot/landing pad templates/
