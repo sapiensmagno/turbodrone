@@ -452,13 +452,18 @@ Timing fields:
 Frame freshness fields:
 
 - `frame_age_ms`: `t_flow_start - timestamp`.
-  - Uses the frame’s own `timestamp` (as provided by the frame source) and measures how “old” the image is by the time we start optical flow.
-  - Includes camera/transport/decode delay *and* any time waiting in the buffer before use.
+  - Uses the frame’s `timestamp`, which in this project is a **local monotonic timestamp assigned when OpenCV decodes the frame** (not a drone-provided capture timestamp).
+  - Measures how long it has been since the frame became available to the process (decode → flow start).
 - `frame_stale_ms`: `t_flow_start - t_frame_received`.
   - Uses the time when the background frame thread received/decoded the frame and placed it in the size-1 buffer.
   - Mostly measures *how long the latest decoded frame sat around before the control loop used it*.
 
 In general you should expect `frame_age_ms >= frame_stale_ms`.
+
+Relationship between `timestamp` and `t_frame_received`:
+
+- `timestamp` is recorded in the video decode thread when a frame is read/decoded.
+- `t_frame_received` is recorded in the `LatestFrameBuffer` thread when it fetches that decoded frame and writes it into the size-1 buffer.
 
 Interpretation:
 
