@@ -25,7 +25,7 @@
  - **Primary UX:** Qt app is the control room; CLI is secondary.
  - **Camera:** downward-facing is the default and assumed for stabilization.
  - **No expensive drone modifications:** no added sensors/hardware.
- - **Optional low-cost aids are allowed:** printable landing pad, optional external phone camera later.
+ - **Optional low-cost aids are allowed:** user-provided textured reference object/pad (with known dimensions), optional external phone camera later.
  - **Goal:** “better than a human pilot” means higher bandwidth and repeatability, quantified via metrics and robust across conditions.
  - **Battery telemetry:** not available; if dynamics drift meaningfully we will re-identify the model periodically rather than relying on battery measurements.
  
@@ -111,8 +111,8 @@
  ### 5.2 Invest early in observability (Phase 0)
  We prioritize measurement and explainability before aggressive tuning.
  
- ### 5.3 Printable landing pad as a controlled visual environment
- A standardized pad reduces environmental variability and addresses early texture issues at minimal cost.
+ ### 5.3 Textured reference object as a controlled visual environment
+ A textured reference object/pad reduces environmental variability and addresses early texture issues at minimal cost.
  
  ### 5.4 External camera later, initially for scoring only
  External phone camera integration is deferred until the onboard loop is strong. Initially it is used for **validation/scoring**, not control.
@@ -226,7 +226,7 @@
  
  ---
  
- ## Phase 0 — Observability + Latency Budget Verification
+ ## Phase 0 — Observability + Latency Budget Verification [DONE - 2026-01-01]
  
  ### Objectives
  - Make the stabilizer explainable in real time.
@@ -284,7 +284,85 @@
  
  ---
  
- ## Phase 1 — Safety Supervisor + Robust Control Loop Behavior
+ ## Phase 1 — Altitude Estimation + Scale Normalization (px/s → m/s)
+ 
+ ### Objectives
+ - Solve the scale ambiguity problem: make optical-flow-based velocity usable in physical units.
+ - Determine altitude using a user-provided textured reference object/pad with known physical dimensions.
+ - Translate `vx_px_s`/`vy_px_s` into `vx_m_s`/`vy_m_s` so tuning is not altitude-specific.
+ 
+ ### Strategy
+ - Use whatever textured object/pad is available, and evaluate whether the system can detect/track it robustly.
+ - User provides the physical dimensions; the system estimates altitude from the apparent size in pixels.
+ - Prefer **velocity scaling** (controller operates on m/s) over gain scheduling.
+ 
+ ### Implementation checklist
+ - Add a human-entered pad descriptor to session metadata:
+   - `pad_type`: free-text description (e.g., “bath towel”, “wood floor”, “printed sheet”, “doormat”)
+   - `pad_dimensions_m`: physical dimensions (width/height or equivalent) provided by the user
+ - Add Qt “Register Reference” workflow (creates a reusable reference record used by the stabilizer):
+   - **Description:** free-text (saved as `pad_type`)
+   - **Physical dimensions:** width/height in meters (saved as `pad_dimensions_m`)
+   - **Reference image:** user-selected file (top-down-ish photo of the reference object)
+   - **Reference capture height:** distance between camera and reference during that photo (e.g., 0.50m)
+   - **Markers checkbox:** “Markers present (ArUco)”
+   - Save the reference record (image + metadata) in a session-independent location so it can be selected later
+ - Implement reference detection (two modes selected by the reference record):
+   - **Mode A (default, markerless): template matching + homography**
+     - compute keypoints/descriptors on reference image and current frame (e.g., ORB)
+     - match descriptors
+     - estimate homography with RANSAC
+     - project the reference image’s 4 corners into the current frame
+     - compute `ref_size_px` from the projected corner quadrilateral (e.g., average edge length, width/height)
+     - compute and log confidence metrics: match count, inlier count, inlier ratio, reprojection error
+   - **Mode B (markers): corners from markers placed on/near the reference corners**
+     - detect markers in the frame (cv2.aruco.detectMarkers)
+     - infer the reference corner quadrilateral from marker corner positions
+     - compute `ref_size_px` and log marker detection confidence
+ - Implement detection acceptance checks (for both modes):
+   - minimum inlier count / inlier ratio (Mode A)
+   - projected quadrilateral validity (convex, non-degenerate, within image bounds)
+   - rate-of-change limits on `ref_size_px` and `altitude_est_m` between frames
+   - on failure: set `altitude_source = "last_known"` (with increasing uncertainty) or `"unknown"`
+ - Implement visual altitude estimate from known physical dimensions:
+   - compute `ref_size_px`
+   - estimate `altitude_est_m` using calibrated scale factor
+   - log `altitude_est_m`, `altitude_source`, and detection confidence
+ - Implement “Calibrate at known height” workflow (within the same popup):
+   - user enters a calibration height (e.g., 0.50m)
+   - system runs detection live using the drone's camera and computes the implied scale/focal parameter
+   - UI shows the computed altitude and the error versus the entered height
+   - user can accept to store the calibration parameter in the reference record
+ - Implement scale normalization:
+   - compute `vx_m_s`, `vy_m_s` from `vx_px_s`, `vy_px_s` and `altitude_est_m`
+   - ensure controller can operate in m/s (preferred path)
+ - Add scale telemetry:
+   - `altitude_est_m`
+   - `altitude_source` (e.g., `reference_object`, `last_known`, `unknown`)
+   - `ref_detected`, `ref_size_px` (or equivalent)
+   - `vx_m_s`, `vy_m_s`
+ - Add basic takeoff/climb behavior policy:
+   - conservative behavior while altitude changes rapidly
+   - transition to normal behavior only after altitude stabilizes
+ 
+ ### Deliverables
+ - **Meta logging:** `pad_type` and `pad_dimensions_m` recorded in `meta.json`.
+ - **Visual altimeter:** `altitude_est_m` available and logged.
+ - **Scale-normalized velocity:** `vx_m_s`/`vy_m_s` available and logged.
+ 
+ ### Milestones / acceptance criteria
+ - **M1.1:** Session metadata includes `pad_type` and `pad_dimensions_m`.
+ - **M1.2:** Reference object/pad detection works sufficiently to estimate `ref_size_px` in real time.
+ - **M1.3:** `altitude_est_m` is stable enough during hover to support control scaling.
+ - **M1.4:** `vx_m_s`/`vy_m_s` are computed and logged.
+ - **M1.5:** Tuning is no longer altitude-locked: repeated runs at different altitudes show comparable dynamics in m/s terms.
+ 
+ ### Definition of done
+ Phase 1 is done when altitude estimation and px/s→m/s conversion are implemented, logged, and usable for subsequent tuning and system identification.
+ 
+ ---
+ 
+ ## Phase 2 — Safety Supervisor + Robust Control Loop Behavior
  
  ### Objectives
  - Stop crash-driven iteration.
@@ -323,63 +401,14 @@
  - **Telemetry:** supervisor state + reasons, integrator status.
  
  ### Milestones / acceptance criteria
- - **M1.1:** Supervisor state visible in Qt and logged per sample.
- - **M1.2:** Under bad quality/timeout conditions, system neutralizes and/or lands instead of diverging.
- - **M1.3:** Anti-windup behavior is visible in logs (integrator freezes/decays appropriately).
- - **M1.4:** Rate limiting is visible in command traces.
- - **M1.5:** Latency spikes trigger a conservative supervisor response.
+ - **M2.1:** Supervisor state visible in Qt and logged per sample.
+ - **M2.2:** Under bad quality/timeout conditions, system neutralizes and/or lands instead of diverging.
+ - **M2.3:** Anti-windup behavior is visible in logs (integrator freezes/decays appropriately).
+ - **M2.4:** Rate limiting is visible in command traces.
+ - **M2.5:** Latency spikes trigger a conservative supervisor response.
  
  ### Definition of done
- Phase 1 is done when the stabilizer fails safe (neutral/land) under common failure modes and logs a clear root-cause reason.
- 
- ---
- 
- ## Phase 2 — Landing Pad + Visual Altimeter + Gain Scheduling
- 
- ### Objectives
- - Solve early texture reliability issues using a standardized pad.
- - Solve scale ambiguity by estimating altitude and using altitude-aware control.
- - Make behavior consistent across a range of low altitudes.
- 
- ### Strategy
- - Use a printable pad with high-frequency texture, a central marker, and known physical size.
- - Use the pad to estimate altitude (visual altimeter) based on its known physical size.
- - Remove scale ambiguity by either:
-   - converting velocity from px/s to m/s (preferred), or
-   - gain scheduling using altitude.
- 
- ### Implementation checklist
- - Define landing pad specification:
-   - recommended physical size
-   - texture pattern
-   - central marker and known physical size
- - Implement marker detection in downward camera.
- - Implement visual altimeter:
-   - compute `marker_size_px`
-   - estimate `altitude_est_m` via calibrated scale factor
-   - log `altitude_source`, `marker_detected`, `marker_size_px`
- - Implement scale handling:
-   - **Approach A (preferred):** convert `vx_px_s`/`vy_px_s` to `vx_m_s`/`vy_m_s`
-   - **Approach B:** gain scheduling via `gain_scale_factor`
- - Add scale-aware telemetry fields.
- - Add takeoff/climb policy:
-   - conservative gains while altitude changes rapidly
-   - transition to normal control only after altitude stabilizes
- 
- ### Deliverables
- - **Pad spec:** documented design for printing and use.
- - **Visual altimeter:** `altitude_est_m` available and logged.
- - **Scale-aware control:** either m/s control or gain scheduling implemented.
- 
- ### Milestones / acceptance criteria
- - **M2.1:** Pad design is available, printed, and used as the standard test surface.
- - **M2.2:** Marker detection works reliably near hover; `altitude_est_m` is logged.
- - **M2.3:** Scale-aware telemetry exists: `altitude_est_m`, `altitude_source`, and either `vx_m_s/vy_m_s` or `gain_scale_factor`.
- - **M2.4:** Hover over pad at a fixed altitude is stable and repeatable.
- - **M2.5:** Behavior is consistent at multiple altitudes (e.g., 0.3m, 0.5m, 1.0m), avoiding the “too aggressive low / too sluggish high” failure mode.
- 
- ### Definition of done
- Phase 2 is done when the system has an operational altitude estimate and a defined method (velocity scaling or gain scheduling) that makes stabilization behavior consistent across altitude.
+ Phase 2 is done when the stabilizer fails safe (neutral/land) under common failure modes and logs a clear root-cause reason.
  
  ---
  
@@ -497,20 +526,20 @@
  
  ---
  
- ## Phase 5 — Generalization Beyond the Pad + Optional External Camera Scoring
+ ## Phase 5 — Generalization Beyond the Reference Object + Optional External Camera Scoring
  
  ### Objectives
- - Maintain stability when pad/marker is unavailable.
+ - Maintain stability when the reference object/pad is unavailable.
  - Improve robustness to changing textures and altitude.
  - Validate onboard sensing against an external reference when needed.
  
  ### Strategy
- - Implement graceful degradation when marker not detected.
+ - Implement graceful degradation when the reference object cannot be detected.
  - Add secondary heuristics for altitude when possible.
  - Introduce an external phone camera as a scoring/validation tool (not control loop).
  
  ### Implementation checklist
- - Graceful degradation without marker:
+ - Graceful degradation without the reference object:
    - use last known altitude with increasing uncertainty
    - widen deadbands
    - reduce `max_cmd`
@@ -518,7 +547,7 @@
  - Explore feature-based altitude heuristics:
    - average feature size
    - feature density
-   - correlation with marker-based altitude when available
+   - correlation with reference-object-based altitude when available
  - Attitude artifact mitigation:
    - detect coupling between command and measured flow
    - gate or reduce authority when coupling is strong
@@ -565,8 +594,8 @@
  ## 11) One-Line Outcomes per Phase
  
  - **Phase 0:** “I can see and record everything that matters, including latency.”
- - **Phase 1:** “Failures neutralize/land with clear reasons; no crash-driven iteration.”
- - **Phase 2:** “Scale ambiguity is addressed; pad + altimeter yields repeatable sensing and control.”
+ - **Phase 1:** “Scale ambiguity is addressed; altitude is estimated and px/s is normalized to m/s.”
+ - **Phase 2:** “Failures neutralize/land with clear reasons; no crash-driven iteration.”
  - **Phase 3:** “The drone runs its own identification experiments and estimates its dynamics and delay.”
  - **Phase 4:** “It tunes itself safely between runs with bounded updates and rollback.”
  - **Phase 5:** “It generalizes beyond the pad; external camera validates when needed.”
@@ -583,4 +612,4 @@
  4. **Safety supervised:** failures land/neutralize instead of crashing.
  5. **Autonomously tuned:** model is identified and gains are derived and iterated safely.
  6. **Observable:** failures are explainable via logs/UI.
- 7. **Repeatable:** stable hover over the pad across sessions.
+ 7. **Repeatable:** stable hover over the reference object/pad across sessions.
