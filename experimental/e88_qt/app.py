@@ -383,6 +383,8 @@ class E88QtControllerWindow(QMainWindow):
             "estimated_latency_ms": deque(),
             "loop_rate_hz": deque(),
             "frame_rate_hz": deque(),
+            "frame_seq": deque(),
+            "frames_dropped": deque(),
         }
         self._last_diag_update_t: Optional[float] = None
 
@@ -641,9 +643,9 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_frame_stale_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("frame stale", self.diag_frame_stale_label)
 
-        self.diag_frames_dropped_label = QLabel("-")
-        self.diag_frames_dropped_label.setTextFormat(Qt.PlainText)
-        self.diagnostics_form.addRow("frames dropped", self.diag_frames_dropped_label)
+        self.diag_drop_pct_label = QLabel("-")
+        self.diag_drop_pct_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("drop %", self.diag_drop_pct_label)
 
         self.diag_latency_label = QLabel("-")
         self.diag_latency_label.setTextFormat(Qt.PlainText)
@@ -1126,6 +1128,19 @@ class E88QtControllerWindow(QMainWindow):
         _push("estimated_latency_ms", float(t.estimated_latency_ms))
         _push("loop_rate_hz", float(t.loop_rate_hz))
         _push("frame_rate_hz", float(t.frame_rate_hz))
+        _push("frame_seq", float(t.frame_seq))
+        _push("frames_dropped", float(t.frames_dropped))
+
+        drop_pct_cum = (100.0 * float(t.frames_dropped) / float(t.frame_seq)) if int(t.frame_seq) > 0 else 0.0
+        drop_pct_win: Optional[float] = None
+        items_seq = self._diag_series["frame_seq"]
+        items_drop = self._diag_series["frames_dropped"]
+        if len(items_seq) >= 2 and len(items_drop) >= 2:
+            delta_seq = float(items_seq[-1][1]) - float(items_seq[0][1])
+            delta_drop = float(items_drop[-1][1]) - float(items_drop[0][1])
+            if delta_seq > 0.0:
+                drop_pct_win = 100.0 * max(0.0, float(delta_drop)) / float(delta_seq)
+        drop_pct_for_overlay = float(drop_pct_win) if drop_pct_win is not None else float(drop_pct_cum)
 
         diag_update_period = 0.2
         if self._last_diag_update_t is None or (now_m - float(self._last_diag_update_t)) >= diag_update_period:
@@ -1137,7 +1152,10 @@ class E88QtControllerWindow(QMainWindow):
             self.diag_dt_flow_label.setText(f"{_avg('dt_flow_ms', t.dt_flow_ms):.1f} ms")
             self.diag_frame_age_label.setText(f"{_avg('frame_age_ms', t.frame_age_ms):.1f} ms")
             self.diag_frame_stale_label.setText(f"{_avg('frame_stale_ms', t.frame_stale_ms):.1f} ms")
-            self.diag_frames_dropped_label.setText(f"{int(t.frames_dropped)}")
+            if drop_pct_win is None:
+                self.diag_drop_pct_label.setText(f"{drop_pct_cum:.1f} %")
+            else:
+                self.diag_drop_pct_label.setText(f"{drop_pct_win:.1f} % (cum {drop_pct_cum:.1f} %)")
             self.diag_latency_label.setText(f"{_avg('estimated_latency_ms', t.estimated_latency_ms):.1f} ms")
 
         if t.flow is None:
@@ -1211,7 +1229,7 @@ class E88QtControllerWindow(QMainWindow):
             )
             cv2.putText(
                 view,
-                f"dt_total {dt_total_ms:.1f}ms dt_flow {dt_flow_ms:.1f}ms age {frame_age_ms:.1f}ms stale {frame_stale_ms:.1f}ms drop {int(t.frames_dropped)}",
+                f"dt_total {dt_total_ms:.1f}ms dt_flow {dt_flow_ms:.1f}ms age {frame_age_ms:.1f}ms stale {frame_stale_ms:.1f}ms drop {drop_pct_for_overlay:.1f}%",
                 (10, 120),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
