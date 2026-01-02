@@ -10,6 +10,17 @@ The goal is simple:
 - Convert the estimated drift into small **roll/pitch compensation commands**.
 - Provide real-time **telemetry** for a Qt UI (optical-flow overlay + 2D motion/compensation plot).
 
+**Phase 0 status (implemented): observability-first**
+
+Phase 0 focuses on making the estimator and control loop inspectable:
+
+- A **session recorder** writes `meta.json` + `samples.jsonl` for every run.
+- Rich **per-iteration timing** (flow time, total loop time, estimated latency).
+- **Frame acquisition is decoupled** from the control loop via a background thread and a size-1 “latest frame” buffer.
+- **Frame staleness** and **dropped/overwritten frames** are surfaced in telemetry.
+- A Qt UI shows diagnostics, an optical-flow overlay, and a trajectory widget.
+- Stationary **calibration** estimates `estimator_deadband_px_s` and `kalman_sigma_v` and persists them.
+
 ---
 
 ## Index
@@ -31,6 +42,7 @@ The goal is simple:
   - [6.5 PID-like controller parameters](#65-pid-like-controller-parameters)
   - [6.6 Sign conventions (roll_sign, pitch_sign)](#66-sign-conventions-roll_sign-pitch_sign)
 - [7. Telemetry and visualization](#7-telemetry-and-visualization)
+- [7.1 Understanding the key metrics (recommended reading)](#71-understanding-the-key-metrics-recommended-reading)
 - [8. Known challenges and mitigations](#8-known-challenges-and-mitigations)
   - [8.1 Camera orientation and axis confusion](#81-camera-orientation-and-axis-confusion)
   - [8.2 “Torn / split frames” (RTSP/UDP artifacts)](#82-torn--split-frames-rtspudp-artifacts)
@@ -99,6 +111,7 @@ Important practical implications:
 At a high level, every control step does:
 
 1. **Acquire a new video frame** from the drone.
+   - In Phase 0, frame acquisition runs in a background thread and the control loop consumes the latest frame without blocking.
 2. **Track feature points** across consecutive frames (Lucas–Kanade optical flow).
 3. Estimate a single “best” global translation `(dx, dy)` between frames using **RANSAC**.
 4. Convert `(dx, dy, dt)` into velocity `(vx, vy)` in pixels/second.
@@ -298,12 +311,39 @@ These phases run *before* the main hold loop if `enable_takeoff=True`.
   - Minimum quality required to produce a control command.
   - If quality drops below this, controller output is disabled (and integrator reset).
 
+**How `quality` is defined**
+
+`LucasKanadeDriftEstimator` defines:
+
+- `tracked_ratio = n_tracked / max(1, n_features)`
+- `inlier_ratio = n_inliers / max(1, n_tracked)`
+- `quality = clamp(tracked_ratio * inlier_ratio, 0..1)`
+
+Interpretation:
+
+- `quality` measures “how much of the frame’s feature tracking is usable”.
+- A `min_quality` of `0.15` means we accept updates where the estimator thinks at least ~15% of the potential feature evidence is consistent.
+  - Example: `tracked_ratio=0.5` and `inlier_ratio=0.3` gives `quality=0.15`.
+  - If either tracking collapses (few tracked points) or RANSAC consistency collapses (few inliers), `quality` drops.
+
 In `LucasKanadeDriftEstimator` (optical flow) there are additional *internal* robustness gates
 that protect against corrupted frames (e.g., torn frames):
 
 - `max_translation_frac: float = 0.25` (internal default)
   - If estimated per-frame translation exceeds this fraction of the frame size,
     the frame is treated as corrupted and the tracker resets.
+
+**How `max_translation_frac` is computed and used**
+
+In `LucasKanadeDriftEstimator.update()`:
+
+- The estimator works on a (possibly downscaled) grayscale frame `gray`.
+- It computes:
+  - `max_step_px = max_translation_frac * min(gray.height, gray.width)`
+- If `abs(dx_px) > max_step_px` or `abs(dy_px) > max_step_px`, the estimate is rejected.
+
+This is meant as a “corrupted frame / torn frame / huge jump” guardrail.
+It is not a physical limit of the drone.
 
 - `min_inlier_ratio: float = 0.6` (internal default)
   - If RANSAC inlier ratio drops below this, the frame is treated as corrupted
@@ -315,8 +355,21 @@ These are not currently exposed in `StabilizerConfig`.
 
 These live in `VelocityHoldController` and are surfaced through `StabilizerConfig`:
 
-- `max_cmd: float = 0.35`
+- `max_cmd: float = 0.8`
   - Clamp for absolute roll/pitch output.
+
+**What `max_cmd` means**
+
+The controller output is a normalized command in the range `[-1.0, +1.0]`.
+`max_cmd` clamps roll and pitch to `[-max_cmd, +max_cmd]`.
+
+So with `max_cmd=0.8`, the controller can command up to ~80% of full stick deflection on roll/pitch.
+This is not “80% of force” in a physical sense, but it is a large command.
+
+Practical guidance:
+
+- Higher `max_cmd` increases authority (can correct faster) but also increases risk of oscillation and aggressive motion.
+- If you see oscillation, reduce `max_cmd` before touching gains.
 
 - `kp_vx: float = 0.003`
   - Proportional gain for x velocity.
@@ -332,6 +385,29 @@ These live in `VelocityHoldController` and are surfaced through `StabilizerConfi
 
 - `deadband_px_s: float = 3.0`
   - Velocities below this magnitude are treated as 0.
+
+**What `kp_*` and `ki_*` do**
+
+The controller’s job is to turn an observed drift velocity (`vx`, `vy` in px/s) into a correcting roll/pitch command.
+
+It uses two terms:
+
+- **Proportional (P)**: “react to what is happening right now”
+  - `u_p = kp * v`
+  - If drift velocity doubles, the correction doubles.
+  - Too much P causes oscillation/jitter; too little P feels lazy and won’t correct.
+
+- **Integral (I)**: “react to what has been happening for a while”
+  - The controller accumulates velocity over time: `iv += v * dt` (clamped by an internal limit).
+  - Then adds `u_i = ki * iv`.
+  - I helps cancel steady, persistent drift that P alone doesn’t remove.
+  - Too much I causes slow oscillations and can “wind up” (integrator grows while the drone can’t respond).
+
+Tuning workflow (safe):
+
+1. Start with `ki_* = 0` (or very small), tune `kp_*` until drift is reduced.
+2. Add a small `ki_*` only if you still see steady drift.
+3. If you see oscillation, first reduce `max_cmd`, then reduce `kp_*`, then reduce `ki_*`.
 
 ### 6.6 Sign conventions (roll_sign, pitch_sign)
 
@@ -360,11 +436,65 @@ The stabilizer emits `StabilizerTelemetry` containing:
 - `pos_x_px`, `pos_y_px`: the plotted position
 - `cmd_roll`, `cmd_pitch`, `cmd_throttle`: the issued commands
 
+Frame-health fields:
+
+- `frame_stale_ms`: how old the latest decoded frame is (time since it was received by the frame thread).
+- `frame_seq`: monotonically increasing internal sequence number (every received frame increments it).
+- `frame_is_new`: whether the control loop consumed a new frame compared to the previous loop.
+- `frames_dropped`: cumulative count of frames that were overwritten in the size-1 buffer before the control loop could consume them.
+
+Timing fields:
+
+- `dt_flow_ms`: time spent inside optical-flow update.
+- `dt_total_ms`: time from loop start until command send.
+- `estimated_latency_ms`: coarse estimate of sensor-to-command latency computed as `(t_cmd_sent - frame_timestamp)`.
+
+Kalman conditioning fields:
+
+- `kf_input_vx_px_s`, `kf_input_vy_px_s`: the conditioned velocity actually fed into the Kalman update.
+- `kf_gated`: whether the conditioner suppressed (zeroed) at least one component due to deadband.
+
 In the Qt UI:
 
 - The video shows LK tracks and text overlays (phase, velocity, command).
-- The 2D widget plots trajectory `(pos_x_px, pos_y_px)` and draws the latest
-  compensation vector (scaled by `max_cmd`).
+- The 2D widget plots trajectory `(pos_x_px, pos_y_px)` (cyan trace) and draws the latest
+  compensation vector (yellow arrow) scaled relative to `max_cmd`.
+
+### 7.1 Understanding the key metrics (recommended reading)
+
+**`dt_total_ms` vs `dt_flow_ms`**
+
+- `dt_flow_ms` is only the optical-flow compute time.
+- `dt_total_ms` is the overall time spent in the control iteration until the command is sent.
+
+If `dt_total_ms` grows, the controller becomes sluggish even if `dt_flow_ms` stays small.
+
+**`kf_in` and `gated`**
+
+The Kalman filter (when enabled) is fed the *conditioned* velocity:
+
+- `kf_in vx/vy` are after applying `estimator_deadband_px_s`.
+- `gated=1` means at least one component was forced to 0 because it was below the deadband.
+
+This keeps the Kalman position estimate from drifting when the drone is actually still.
+
+**Why frames are “dropped”**
+
+With the size-1 frame buffer, “dropped” means:
+
+- A newer frame arrived before the control loop consumed the previous one.
+- The previous one is overwritten (intentionally) so the controller always uses the freshest data.
+
+Interpretation:
+
+- `frames_dropped` is workload/throughput feedback: if it increases rapidly, the control loop is not keeping up with the camera stream.
+- The absolute number depends on your stream FPS and control rate, so it’s often more meaningful to look at a *rate*.
+
+Derived metrics:
+
+- `drop_pct ~= 100 * frames_dropped / frame_seq` (cumulative percent of overwritten frames)
+
+or (per-second) compute `Δframes_dropped / Δframe_seq` over a window.
 
 ---
 

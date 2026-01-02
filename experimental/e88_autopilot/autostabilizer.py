@@ -32,7 +32,7 @@ class StabilizerConfig:
     kalman_sigma_v: float = 460.0
 
     min_quality: float = 0.15
-    max_cmd: float = 0.35
+    max_cmd: float = 0.8
 
     kp_vx: float = 0.003
     kp_vy: float = 0.003
