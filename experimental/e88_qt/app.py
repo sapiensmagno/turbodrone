@@ -385,6 +385,8 @@ class E88QtControllerWindow(QMainWindow):
             "frame_rate_hz": deque(),
             "frame_seq": deque(),
             "frames_dropped": deque(),
+            "t_loop_start": deque(),
+            "t_frame_received": deque(),
         }
         self._last_diag_update_t: Optional[float] = None
 
@@ -626,6 +628,14 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_frame_rate_label = QLabel("-")
         self.diag_frame_rate_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("Frame rate", self.diag_frame_rate_label)
+
+        self.diag_loop_jitter_label = QLabel("-")
+        self.diag_loop_jitter_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("loop dt std", self.diag_loop_jitter_label)
+
+        self.diag_frame_jitter_label = QLabel("-")
+        self.diag_frame_jitter_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("frame dt std", self.diag_frame_jitter_label)
 
         self.diag_dt_total_label = QLabel("-")
         self.diag_dt_total_label.setTextFormat(Qt.PlainText)
@@ -1130,6 +1140,8 @@ class E88QtControllerWindow(QMainWindow):
         _push("frame_rate_hz", float(t.frame_rate_hz))
         _push("frame_seq", float(t.frame_seq))
         _push("frames_dropped", float(t.frames_dropped))
+        _push("t_loop_start", float(t.t_loop_start))
+        _push("t_frame_received", float(t.t_frame_received))
 
         drop_pct_cum = (100.0 * float(t.frames_dropped) / float(t.frame_seq)) if int(t.frame_seq) > 0 else 0.0
         drop_pct_win: Optional[float] = None
@@ -1142,12 +1154,40 @@ class E88QtControllerWindow(QMainWindow):
                 drop_pct_win = 100.0 * max(0.0, float(delta_drop)) / float(delta_seq)
         drop_pct_for_overlay = float(drop_pct_win) if drop_pct_win is not None else float(drop_pct_cum)
 
+        def _std_ms_from_monotonic_times(times_s: list[float]) -> Optional[float]:
+            if len(times_s) < 3:
+                return None
+            dts = []
+            prev = float(times_s[0])
+            for cur in times_s[1:]:
+                cur_f = float(cur)
+                dt = cur_f - prev
+                if dt > 1e-6:
+                    dts.append(dt)
+                prev = cur_f
+            if len(dts) < 2:
+                return None
+            return float(np.std(np.asarray(dts, dtype=float)) * 1000.0)
+
+        loop_dt_std_ms = _std_ms_from_monotonic_times([float(v) for (_, v) in self._diag_series["t_loop_start"]])
+
+        new_frame_times = []
+        last_seq: Optional[int] = None
+        for ((_, seq_v), (_, tr_v)) in zip(self._diag_series["frame_seq"], self._diag_series["t_frame_received"]):
+            seq_i = int(round(float(seq_v)))
+            if last_seq is None or seq_i != int(last_seq):
+                new_frame_times.append(float(tr_v))
+                last_seq = int(seq_i)
+        frame_dt_std_ms = _std_ms_from_monotonic_times(new_frame_times)
+
         diag_update_period = 0.2
         if self._last_diag_update_t is None or (now_m - float(self._last_diag_update_t)) >= diag_update_period:
             self._last_diag_update_t = float(now_m)
 
             self.diag_loop_rate_label.setText(f"{_avg('loop_rate_hz', t.loop_rate_hz):.1f} Hz")
             self.diag_frame_rate_label.setText(f"{_avg('frame_rate_hz', t.frame_rate_hz):.1f} Hz")
+            self.diag_loop_jitter_label.setText("-" if loop_dt_std_ms is None else f"{loop_dt_std_ms:.1f} ms")
+            self.diag_frame_jitter_label.setText("-" if frame_dt_std_ms is None else f"{frame_dt_std_ms:.1f} ms")
             self.diag_dt_total_label.setText(f"{_avg('dt_total_ms', t.dt_total_ms):.1f} ms")
             self.diag_dt_flow_label.setText(f"{_avg('dt_flow_ms', t.dt_flow_ms):.1f} ms")
             self.diag_frame_age_label.setText(f"{_avg('frame_age_ms', t.frame_age_ms):.1f} ms")
