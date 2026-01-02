@@ -206,6 +206,8 @@ class _AutostabilizerWorker(QThread):
             "estimated_latency_ms": float(t.estimated_latency_ms),
             "loop_rate_hz": float(t.loop_rate_hz),
             "frame_rate_hz": float(t.frame_rate_hz),
+            "visual_scale_enabled": bool(getattr(t, "visual_scale_enabled", False)),
+            "visual_scale_error": str(getattr(t, "visual_scale_error", "")),
             "altitude_est_m": None if t.altitude_est_m is None else float(t.altitude_est_m),
             "altitude_source": str(t.altitude_source),
             "ref_detected": bool(t.ref_detected),
@@ -1460,7 +1462,12 @@ class E88QtControllerWindow(QMainWindow):
             self.diag_vel_ms_label.setText(f"vx {float(vx_ms):+.3f}  vy {float(vy_ms):+.3f}")
 
         if not bool(t.ref_detected):
-            self.diag_ref_stats_label.setText("-")
+            vs_err = str(getattr(t, "visual_scale_error", ""))
+            vs_on = bool(getattr(t, "visual_scale_enabled", False))
+            if vs_on and vs_err:
+                self.diag_ref_stats_label.setText(f"err {vs_err}")
+            else:
+                self.diag_ref_stats_label.setText("-")
         else:
             self.diag_ref_stats_label.setText(
                 f"{str(t.ref_mode)} inl {float(t.ref_inlier_ratio):.2f} err {float(t.ref_reproj_error_px):.1f} px"

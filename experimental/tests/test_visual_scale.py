@@ -101,6 +101,67 @@ class TestVisualScaleEstimator(unittest.TestCase):
         self.assertEqual(out3.altitude_source, "last_known")
         self.assertIsNotNone(out3.altitude_est_m)
 
+    def test_altitude_smoothing_prevents_large_spike(self) -> None:
+        rec = ReferenceRecord(
+            reference_id="r1",
+            created_at_ts=0.0,
+            pad_type="pad",
+            pad_width_m=0.4,
+            pad_height_m=0.3,
+            reference_capture_height_m=1.0,
+            markers_present=False,
+            image_filename="ref.png",
+            calibration_height_m=1.0,
+            calibration_ref_size_px=200.0,
+        )
+
+        ok = ReferenceDetectionResult(
+            detected=True,
+            mode="orb",
+            quad_xy=np.zeros((4, 2), dtype=np.float32),
+            ref_width_px=200.0,
+            ref_height_px=200.0,
+            ref_size_px=200.0,
+            n_kp_frame=100,
+            n_matches=80,
+            n_inliers=60,
+            inlier_ratio=0.75,
+            reproj_error_px=1.0,
+        )
+
+        spike = ReferenceDetectionResult(
+            detected=True,
+            mode="orb",
+            quad_xy=np.zeros((4, 2), dtype=np.float32),
+            ref_width_px=25.0,
+            ref_height_px=25.0,
+            ref_size_px=25.0,
+            n_kp_frame=100,
+            n_matches=80,
+            n_inliers=60,
+            inlier_ratio=0.75,
+            reproj_error_px=1.0,
+        )
+
+        est = VisualScaleEstimator(record=rec, reference_image_bgr=np.zeros((10, 10, 3), dtype=np.uint8), stable_required_frames=1)
+        est._detector = _FakeDetector([ok, ok, spike])  # type: ignore[attr-defined]
+
+        out1 = est.update(frame_bgr=np.zeros((10, 10, 3), dtype=np.uint8), timestamp=0.0, vx_px_s=0.0, vy_px_s=0.0)
+        self.assertTrue(out1.ref_detected)
+        self.assertIsNotNone(out1.altitude_est_m)
+        self.assertAlmostEqual(float(out1.altitude_est_m), 1.0, places=6)
+
+        out2 = est.update(frame_bgr=np.zeros((10, 10, 3), dtype=np.uint8), timestamp=0.1, vx_px_s=0.0, vy_px_s=0.0)
+        self.assertTrue(out2.ref_detected)
+        self.assertIsNotNone(out2.altitude_est_m)
+
+        # Simulate a large timestamp gap where the ref-size-based acceptance gate might otherwise
+        # allow a bad detection through. The filter should still prevent a 1m -> 8m jump.
+        out3 = est.update(frame_bgr=np.zeros((10, 10, 3), dtype=np.uint8), timestamp=5.0, vx_px_s=0.0, vy_px_s=0.0)
+        self.assertTrue(out3.ref_detected)
+        self.assertIsNotNone(out3.altitude_est_m)
+        self.assertLess(float(out3.altitude_est_m), 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

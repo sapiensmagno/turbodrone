@@ -93,6 +93,9 @@ class StabilizerTelemetry:
     loop_rate_hz: float = 0.0
     frame_rate_hz: float = 0.0
 
+    visual_scale_enabled: bool = False
+    visual_scale_error: str = ""
+
     altitude_est_m: Optional[float] = None
     altitude_source: str = "unknown"
     ref_detected: bool = False
@@ -215,6 +218,7 @@ class AutoStabilizer:
         )
 
         self._visual_scale: Optional[VisualScaleEstimator] = None
+        self._visual_scale_error: str = ""
 
         self._active = False
         self._last_loop_t: Optional[float] = None
@@ -242,18 +246,22 @@ class AutoStabilizer:
 
     def _init_visual_scale(self) -> None:
         self._visual_scale = None
+        self._visual_scale_error = ""
         if not bool(self._cfg.enable_visual_scale):
             return
         ref_id = self._cfg.reference_id
         if ref_id is None or not str(ref_id).strip():
+            self._visual_scale_error = "no_reference_id"
             return
 
         store = ReferenceStore()
         record = store.load(str(ref_id))
         if record is None:
+            self._visual_scale_error = "reference_record_not_found"
             return
         img = store.load_image_bgr(str(ref_id))
         if img is None:
+            self._visual_scale_error = "reference_image_not_found"
             return
 
         self._visual_scale = VisualScaleEstimator(
@@ -390,6 +398,8 @@ class AutoStabilizer:
                                 t_cmd_sent=float(t_cmd_sent),
                                 dt_total_ms=float((t_cmd_sent - t_loop_start) * 1000.0),
                                 frames_dropped=int(frame_buf.dropped_total),
+                                visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                                visual_scale_error=str(self._visual_scale_error),
                             )
                         )
                         time.sleep(0.01)
@@ -455,6 +465,38 @@ class AutoStabilizer:
                     self._viz_x_px += float(cond.vx_px_s) * float(est.dt_sec)
                     self._viz_y_px += float(cond.vy_px_s) * float(est.dt_sec)
 
+                    scale = None
+                    vs_error = str(self._visual_scale_error)
+                    if self._visual_scale is not None:
+                        try:
+                            scale = self._visual_scale.update(
+                                frame_bgr=frame,
+                                timestamp=float(ts),
+                                vx_px_s=float(cond.vx_px_s),
+                                vy_px_s=float(cond.vy_px_s),
+                            )
+                        except Exception as e:
+                            scale = None
+                            vs_error = f"{type(e).__name__}: {e}"
+
+                    altitude_est_m = None if scale is None else scale.altitude_est_m
+                    altitude_source = str("unknown" if scale is None else scale.altitude_source)
+                    ref_detected = bool(False if scale is None else scale.ref_detected)
+                    ref_width_px = float(0.0 if scale is None else scale.ref_width_px)
+                    ref_height_px = float(0.0 if scale is None else scale.ref_height_px)
+                    ref_size_px = float(0.0 if scale is None else scale.ref_size_px)
+                    ref_quad_xy = None
+                    if scale is not None and bool(scale.ref_detected) and scale.detection.quad_xy is not None:
+                        ref_quad_xy = np.asarray(scale.detection.quad_xy, dtype=np.float32).copy()
+                    vx_m_s = None if scale is None else scale.vx_m_s
+                    vy_m_s = None if scale is None else scale.vy_m_s
+                    scale_stable = bool(False if scale is None else scale.stable)
+                    ref_mode = str("") if scale is None else str(scale.detection.mode)
+                    ref_n_matches = int(0 if scale is None else scale.detection.n_matches)
+                    ref_n_inliers = int(0 if scale is None else scale.detection.n_inliers)
+                    ref_inlier_ratio = float(0.0 if scale is None else scale.detection.inlier_ratio)
+                    ref_reproj_error_px = float(0.0 if scale is None else scale.detection.reproj_error_px)
+
                     t_ctrl_end = float(time.monotonic())
                     self._frame_rate_hz_ema = self._update_rate_ema(
                         prev=self._frame_rate_hz_ema, inst=(1.0 / float(est.dt_sec))
@@ -496,6 +538,25 @@ class AutoStabilizer:
                             estimated_latency_ms=float(max(0.0, (t_cmd_sent - float(ts)) * 1000.0)),
                             loop_rate_hz=float(self._loop_rate_hz_ema),
                             frame_rate_hz=float(self._frame_rate_hz_ema),
+                            visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                            visual_scale_error=str(vs_error),
+                            altitude_est_m=None if altitude_est_m is None else float(altitude_est_m),
+                            altitude_source=str(altitude_source),
+                            ref_detected=bool(ref_detected),
+                            ref_width_px=float(ref_width_px),
+                            ref_height_px=float(ref_height_px),
+                            ref_size_px=float(ref_size_px),
+                            ref_quad_xy=ref_quad_xy,
+                            vx_m_s=None if vx_m_s is None else float(vx_m_s),
+                            vy_m_s=None if vy_m_s is None else float(vy_m_s),
+                            used_vx_m_s=None,
+                            used_vy_m_s=None,
+                            scale_stable=bool(scale_stable),
+                            ref_mode=str(ref_mode),
+                            ref_n_matches=int(ref_n_matches),
+                            ref_n_inliers=int(ref_n_inliers),
+                            ref_inlier_ratio=float(ref_inlier_ratio),
+                            ref_reproj_error_px=float(ref_reproj_error_px),
                         )
                     )
 
@@ -544,6 +605,8 @@ class AutoStabilizer:
                             loop_rate_hz=float(self._loop_rate_hz_ema),
                             frame_rate_hz=float(self._frame_rate_hz_ema),
                             frames_dropped=int(frame_buf.dropped_total),
+                            visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                            visual_scale_error=str(self._visual_scale_error),
                         )
                     )
                     time.sleep(period)
@@ -593,6 +656,8 @@ class AutoStabilizer:
                             estimated_latency_ms=float(max(0.0, (t_cmd_sent - float(ts)) * 1000.0)),
                             loop_rate_hz=float(self._loop_rate_hz_ema),
                             frame_rate_hz=float(self._frame_rate_hz_ema),
+                            visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                            visual_scale_error=str(self._visual_scale_error),
                         )
                     )
                     time.sleep(period)
@@ -619,6 +684,7 @@ class AutoStabilizer:
                 )
 
                 scale = None
+                vs_error = str(self._visual_scale_error)
                 if self._visual_scale is not None:
                     try:
                         scale = self._visual_scale.update(
@@ -627,8 +693,9 @@ class AutoStabilizer:
                             vx_px_s=float(vx),
                             vy_px_s=float(vy),
                         )
-                    except Exception:
+                    except Exception as e:
                         scale = None
+                        vs_error = f"{type(e).__name__}: {e}"
 
                 altitude_est_m = None if scale is None else scale.altitude_est_m
                 altitude_source = str("unknown" if scale is None else scale.altitude_source)
@@ -711,6 +778,8 @@ class AutoStabilizer:
                             estimated_latency_ms=float(max(0.0, (t_cmd_sent - float(ts)) * 1000.0)),
                             loop_rate_hz=float(self._loop_rate_hz_ema),
                             frame_rate_hz=float(self._frame_rate_hz_ema),
+                            visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                            visual_scale_error=str(vs_error),
                             altitude_est_m=None if altitude_est_m is None else float(altitude_est_m),
                             altitude_source=str(altitude_source),
                             ref_detected=bool(ref_detected),
@@ -788,6 +857,8 @@ class AutoStabilizer:
                             ref_n_inliers=int(ref_n_inliers),
                             ref_inlier_ratio=float(ref_inlier_ratio),
                             ref_reproj_error_px=float(ref_reproj_error_px),
+                            visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                            visual_scale_error=str(vs_error),
                         )
                     )
 
