@@ -734,12 +734,12 @@ class AutoStabilizer:
                 if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and use_m_s:
                     out = self._ctl_m.update(
                         dt_sec=est.dt_sec,
-                        vx_px_s=float(vx_m_s),
-                        vy_px_s=float(vy_m_s),
+                        vx_px_s=float(vy_m_s),
+                        vy_px_s=float(vx_m_s),
                         quality=q,
                     )
                 else:
-                    out = self._ctl_px.update(dt_sec=est.dt_sec, vx_px_s=vx, vy_px_s=vy, quality=q)
+                    out = self._ctl_px.update(dt_sec=est.dt_sec, vx_px_s=vy, vy_px_s=vx, quality=q)
 
                 cmd_scale = 1.0
                 if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and (not use_m_s):

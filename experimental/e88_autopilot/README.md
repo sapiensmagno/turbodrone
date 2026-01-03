@@ -222,10 +222,12 @@ So if you observe “moving the drone right produces positive `pos_y_px`”, tha
 
 #### 4.4.2 Mapping from drift velocity to roll/pitch commands
 
-The mapping is implemented in `controller.py` (`VelocityHoldController`). It is **not cross-coupled**:
+The mapping is implemented in `controller.py` (`VelocityHoldController`) and wired in `autostabilizer.py`.
+Because the E88’s downward-facing camera is effectively rotated by ~90° relative to the intuitive “forward/right” axes,
+the stabilizer applies a fixed 90° remap when feeding the controller:
 
-- **Roll command depends only on `vx`**
-- **Pitch command depends only on `vy`**
+- **Roll is driven from measured `vy`**
+- **Pitch is driven from measured `vx`**
 
 Specifically (PI controller per axis):
 
@@ -236,19 +238,14 @@ Specifically (PI controller per axis):
   - `ivx = clamp(ivx + vx * dt, -integrator_limit, +integrator_limit)`
   - `ivy = clamp(ivy + vy * dt, -integrator_limit, +integrator_limit)`
 - PI “raw” commands:
-  - `u_roll  = kp_vx * vx + ki_vx * ivx`
-  - `u_pitch = kp_vy * vy + ki_vy * ivy`
+  - `u_roll  = kp_vx * vy + ki_vx * ∫ vy dt`
+  - `u_pitch = kp_vy * vx + ki_vy * ∫ vx dt`
 - Apply configurable sign flips (to handle camera/drone orientation differences):
   - `roll  = clamp(roll_sign  * u_roll,  -max_cmd, +max_cmd)`
   - `pitch = clamp(pitch_sign * u_pitch, -max_cmd, +max_cmd)`
 
-There is currently **no axis swap** option in code (no “use `vy` for roll” / “use `vx` for pitch”).
-That means:
-
-- If right/left drift shows up in `vy`, the controller will try to correct it with **pitch**, not roll.
-- Fixing this requires either:
-  - changing the camera orientation / how frames are fed to the flow estimator, or
-  - adding an explicit axis swap/remap in the controller or estimator.
+The sign flips `roll_sign` / `pitch_sign` still apply after this remap, and exist to handle remaining direction inversions
+from camera mounting, headless mode, or protocol conventions.
 
 #### 4.4.3 When and for how long commands are applied
 
