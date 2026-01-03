@@ -28,6 +28,7 @@ class ReferenceDetector:
         *,
         reference_bgr: np.ndarray,
         use_markers: bool,
+        method: str = "auto",
         min_matches: int = 30,
         min_inliers: int = 20,
         min_inlier_ratio: float = 0.4,
@@ -36,8 +37,15 @@ class ReferenceDetector:
         contour_canny2: int = 400,
         contour_dilate_ksize: int = 5,
         contour_dilate_iter: int = 1,
+        closed_quad_canny1: int = 100,
+        closed_quad_canny2: int = 400,
+        closed_quad_close_ksize: int = 40,
+        closed_quad_poly_eps_frac: float = 0.02,
+        closed_quad_min_area_px: float = 1000.0,
+        closed_quad_topk: int = 10,
     ) -> None:
         self._use_markers = bool(use_markers)
+        self._method = str(method).strip().lower()
         self._min_matches = int(min_matches)
         self._min_inliers = int(min_inliers)
         self._min_inlier_ratio = float(min_inlier_ratio)
@@ -47,6 +55,13 @@ class ReferenceDetector:
         self._contour_canny2 = int(contour_canny2)
         self._contour_dilate_ksize = int(contour_dilate_ksize)
         self._contour_dilate_iter = int(contour_dilate_iter)
+
+        self._closed_quad_canny1 = int(closed_quad_canny1)
+        self._closed_quad_canny2 = int(closed_quad_canny2)
+        self._closed_quad_close_ksize = int(closed_quad_close_ksize)
+        self._closed_quad_poly_eps_frac = float(closed_quad_poly_eps_frac)
+        self._closed_quad_min_area_px = float(closed_quad_min_area_px)
+        self._closed_quad_topk = int(closed_quad_topk)
 
         self._ref_gray = cv2.cvtColor(reference_bgr, cv2.COLOR_BGR2GRAY)
         self._ref_h, self._ref_w = self._ref_gray.shape[:2]
@@ -61,7 +76,14 @@ class ReferenceDetector:
         return float(0.5 * (float(self._ref_w) + float(self._ref_h)))
 
     def detect(self, frame_bgr: np.ndarray) -> ReferenceDetectionResult:
-        if self._use_markers:
+        m = self._method
+        if m == "":
+            m = "auto"
+
+        if m == "auto" and self._use_markers:
+            m = "markers"
+
+        if m == "markers":
             out = self._detect_markers(frame_bgr)
             if out is not None:
                 return out
@@ -79,14 +101,106 @@ class ReferenceDetector:
                 reproj_error_px=0.0,
             )
 
-        out = self._detect_orb_homography(frame_bgr)
-        if bool(out.detected):
+        if m == "closed_quad":
+            out = self._detect_closed_quad(frame_bgr)
+            if out is not None:
+                return out
+            return ReferenceDetectionResult(
+                detected=False,
+                mode="closed_quad",
+                quad_xy=None,
+                ref_width_px=0.0,
+                ref_height_px=0.0,
+                ref_size_px=0.0,
+                n_kp_frame=0,
+                n_matches=0,
+                n_inliers=0,
+                inlier_ratio=0.0,
+                reproj_error_px=0.0,
+            )
+
+        if m == "orb" or m == "orb_contours" or m == "auto":
+            out = self._detect_orb_homography(frame_bgr)
+            if bool(out.detected):
+                return out
+
+            fb = self._detect_contour_min_area_rect(frame_bgr)
+            if fb is not None:
+                return fb
             return out
 
-        fb = self._detect_contour_min_area_rect(frame_bgr)
-        if fb is not None:
-            return fb
-        return out
+        return ReferenceDetectionResult(
+            detected=False,
+            mode=str(m),
+            quad_xy=None,
+            ref_width_px=0.0,
+            ref_height_px=0.0,
+            ref_size_px=0.0,
+            n_kp_frame=0,
+            n_matches=0,
+            n_inliers=0,
+            inlier_ratio=0.0,
+            reproj_error_px=0.0,
+        )
+
+    def _detect_closed_quad(self, frame_bgr: np.ndarray) -> Optional[ReferenceDetectionResult]:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        edged = cv2.Canny(gray, self._closed_quad_canny1, self._closed_quad_canny2)
+        k = int(self._closed_quad_close_ksize)
+        if k > 0:
+            kernel = np.ones((k, k), np.uint8)
+            closed = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel)
+        else:
+            closed = edged
+
+        contours, _hier = cv2.findContours(closed.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        topk = int(max(1, self._closed_quad_topk))
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:topk]
+
+        min_area = float(self._closed_quad_min_area_px)
+        eps_frac = float(self._closed_quad_poly_eps_frac)
+
+        for c in contours:
+            area = float(cv2.contourArea(c))
+            if area < min_area:
+                continue
+            peri = float(cv2.arcLength(c, True))
+            if peri <= 1e-6:
+                continue
+            approx = cv2.approxPolyDP(c, eps_frac * peri, True)
+            if approx is None:
+                continue
+            if int(len(approx)) != 4:
+                continue
+
+            q = approx.reshape(4, 2).astype(np.float32)
+            rect = cv2.minAreaRect(q.reshape(-1, 1, 2))
+            box = cv2.boxPoints(rect).astype(np.float32)
+
+            if not _quad_is_valid(box, frame_shape=gray.shape[:2]):
+                continue
+
+            ref_w_px, ref_h_px, ref_size_px = _quad_sizes(box)
+            return ReferenceDetectionResult(
+                detected=True,
+                mode="closed_quad",
+                quad_xy=box,
+                ref_width_px=float(ref_w_px),
+                ref_height_px=float(ref_h_px),
+                ref_size_px=float(ref_size_px),
+                n_kp_frame=0,
+                n_matches=0,
+                n_inliers=0,
+                inlier_ratio=0.0,
+                reproj_error_px=0.0,
+            )
+
+        return None
 
     def _detect_contour_min_area_rect(self, frame_bgr: np.ndarray) -> Optional[ReferenceDetectionResult]:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)

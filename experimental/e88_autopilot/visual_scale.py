@@ -125,12 +125,18 @@ class VisualScaleEstimator:
         *,
         record: ReferenceRecord,
         reference_image_bgr: np.ndarray,
+        detection_method: str = "auto",
         stable_required_frames: int = 8,
         max_ref_size_frac_per_sec: float = 2.0,
         altitude_smoother_cfg: Optional[AltitudeSmootherConfig] = None,
     ) -> None:
         self._record = record
-        self._detector = ReferenceDetector(reference_bgr=reference_image_bgr, use_markers=bool(record.markers_present))
+        method = "markers" if bool(record.markers_present) else str(detection_method)
+        self._detector = ReferenceDetector(
+            reference_bgr=reference_image_bgr,
+            use_markers=bool(record.markers_present),
+            method=str(method),
+        )
 
         self._stable_required_frames = int(max(1, stable_required_frames))
         self._max_ref_size_frac_per_sec = float(max(0.01, max_ref_size_frac_per_sec))

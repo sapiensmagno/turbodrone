@@ -142,7 +142,7 @@ def main():
 #     return 0
 
 # # --- RUN THE DEBUGGER ---
-# image = cv2.imread('e88_autopilot/landing pad templates/ludo-board.jpg')
+# image = cv2.imread('e88_autopilot/landing pad templates/ludo2.jpg')
 # if image is not None:
 #     width = find_board_debug(image)
 #     if width == 0:
@@ -211,7 +211,7 @@ def main():
 #     return max(w, h), box
 
 # # --- Usage ---
-# image = cv2.imread('e88_autopilot/landing pad templates/ludo-board.jpg')
+# image = cv2.imread('e88_autopilot/landing pad templates/ludo2.jpg')
 # width_px, box = find_board_robust(image)
 
 # if box is not None:
@@ -222,84 +222,84 @@ def main():
 #     cv2.destroyAllWindows()
 
 
-# import cv2
-# import numpy as np
+import cv2
+import numpy as np
 
-# def find_board_debug(image):
-#     # 1. Pre-processing
-#     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+def find_board_debug(image):
+    # 1. Pre-processing
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-#     # Gaussian Blur: Helps reduce noise before edge detection
-#     gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Gaussian Blur: Helps reduce noise before edge detection
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-#     # 2. Edge Detection (Canny)
-#     # Using your parameters 100, 400
-#     edged = cv2.Canny(gray, 100, 400) 
+    # 2. Edge Detection (Canny)
+    # Using your parameters 100, 400
+    edged = cv2.Canny(gray, 100, 400) 
     
-#     # SHOW RAW CANNY (Before Closing)
-#     cv2.imshow("Debug 1: Raw Canny", edged)
+    # SHOW RAW CANNY (Before Closing)
+    cv2.imshow("Debug 1: Raw Canny", edged)
 
-#     # --- METHOD 1 INSERTION: Morphological Closing ---
-#     # This "smears" white pixels to bridge gaps.
-#     # If lines still don't close, increase (5, 5) to (7, 7) or (9, 9).
-#     # If it merges too much (blobs), decrease to (3, 3).
-#     kernel = np.ones((40, 40), np.uint8)
-#     closed = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel)
+    # --- METHOD 1 INSERTION: Morphological Closing ---
+    # This "smears" white pixels to bridge gaps.
+    # If lines still don't close, increase (5, 5) to (7, 7) or (9, 9).
+    # If it merges too much (blobs), decrease to (3, 3).
+    kernel = np.ones((40, 40), np.uint8)
+    closed = cv2.morphologyEx(edged, cv2.MORPH_CLOSE, kernel)
     
-#     # SHOW CLOSED EDGES (After Closing)
-#     cv2.imshow("Debug 2: Closed Edges", closed)
-#     print("Press any key to proceed to contour detection...")
-#     cv2.waitKey(0) 
-#     # -------------------------------------------------
+    # SHOW CLOSED EDGES (After Closing)
+    cv2.imshow("Debug 2: Closed Edges", closed)
+    print("Press any key to proceed to contour detection...")
+    cv2.waitKey(0) 
+    # -------------------------------------------------
 
-#     # 3. Find Contours
-#     # Note: We are now using 'closed' instead of 'edged'
-#     contours, _ = cv2.findContours(closed.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    # 3. Find Contours
+    # Note: We are now using 'closed' instead of 'edged'
+    contours, _ = cv2.findContours(closed.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     
-#     # Sort by area, keep largest 10
-#     contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
+    # Sort by area, keep largest 10
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:10]
 
-#     board_contour = None
+    board_contour = None
     
-#     for i, c in enumerate(contours):
-#         peri = cv2.arcLength(c, True)
-#         # 0.02 is standard. 
-#         # If the shape is slightly distorted, try loosening this to 0.03 or 0.04.
-#         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+    for i, c in enumerate(contours):
+        peri = cv2.arcLength(c, True)
+        # 0.02 is standard. 
+        # If the shape is slightly distorted, try loosening this to 0.03 or 0.04.
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
         
-#         print(f"Contour #{i} points: {len(approx)} | Area: {cv2.contourArea(c)}")
+        print(f"Contour #{i} points: {len(approx)} | Area: {cv2.contourArea(c)}")
 
-#         # Check if it has 4 points and is reasonably large (area > 1000)
-#         if len(approx) == 4 and cv2.contourArea(c) > 1000:
-#             board_contour = approx
-#             x, y, w, h = cv2.boundingRect(board_contour)
+        # Check if it has 4 points and is reasonably large (area > 1000)
+        if len(approx) == 4 and cv2.contourArea(c) > 1000:
+            board_contour = approx
+            x, y, w, h = cv2.boundingRect(board_contour)
             
-#             # Draw the successful detection in GREEN
-#             cv2.drawContours(image, [board_contour], -1, (0, 255, 0), 3)
-#             return (w + h) / 2
-#         else:
-#             # Draw failed candidates in RED to see what is being picked up
-#             cv2.drawContours(image, [approx], -1, (0, 0, 255), 1)
+            # Draw the successful detection in GREEN
+            cv2.drawContours(image, [board_contour], -1, (0, 255, 0), 3)
+            return (w + h) / 2
+        else:
+            # Draw failed candidates in RED to see what is being picked up
+            cv2.drawContours(image, [approx], -1, (0, 0, 255), 1)
 
-#     return 0
+    return 0
 
-# # --- RUN THE DEBUGGER ---
-# # I kept your specific path here
-# image_path = 'e88_autopilot/landing pad templates/ludo-board.jpg'
-# image = cv2.imread(image_path)
+# --- RUN THE DEBUGGER ---
+# I kept your specific path here
+image_path = 'e88_autopilot/landing pad templates/ludo2.jpg'
+image = cv2.imread(image_path)
 
-# if image is None:
-#     print(f"Error: Could not load image from {image_path}")
-# else:
-#     width = find_board_debug(image)
-#     if width == 0:
-#         print("Still no board found. Check 'Debug 2' to see if gaps are closed.")
-#     else:
-#         print(f"Success! Board width in pixels: {width}")
-#         cv2.imshow("Result", image)
-#         cv2.waitKey(0)
+if image is None:
+    print(f"Error: Could not load image from {image_path}")
+else:
+    width = find_board_debug(image)
+    if width == 0:
+        print("Still no board found. Check 'Debug 2' to see if gaps are closed.")
+    else:
+        print(f"Success! Board width in pixels: {width}")
+        cv2.imshow("Result", image)
+        cv2.waitKey(0)
 
-# cv2.destroyAllWindows()
+cv2.destroyAllWindows()
 
 # ###############################
 # # FILTER VERSION - kernel extension
@@ -386,72 +386,73 @@ def main():
 #         cv2.waitKey(0)
 #         cv2.destroyAllWindows()
 
+#### latest: forced square detection
 
-import cv2
-import numpy as np
+# import cv2
+# import numpy as np
 
-def find_board_square_forced(image):
-    # 1. Image Pre-processing
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+# def find_board_square_forced(image):
+#     # 1. Image Pre-processing
+#     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+#     gray = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # 2. Canny (Using your tuned parameters)
-    edged = cv2.Canny(gray, 100, 400)
+#     # 2. Canny (Using your tuned parameters)
+#     edged = cv2.Canny(gray, 100, 400)
 
-    # 3. Dilation (Optional but helpful) - thickens lines slightly to help connection
-    kernel = np.ones((5, 5), np.uint8)
-    edged = cv2.dilate(edged, kernel, iterations=1)
+#     # 3. Dilation (Optional but helpful) - thickens lines slightly to help connection
+#     kernel = np.ones((5, 5), np.uint8)
+#     edged = cv2.dilate(edged, kernel, iterations=1)
 
-    # 4. Find ALL contours (even the broken bits)
-    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#     # 4. Find ALL contours (even the broken bits)
+#     contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # 5. Filter and Combine
-    # We want to ignore the noise at the top, so we keep only "significant" lines.
-    significant_contours = []
-    for c in contours:
-        # If the line is long enough (e.g., > 50 pixels), it's part of the board
-        if cv2.arcLength(c, True) > 50:
-            significant_contours.append(c)
+#     # 5. Filter and Combine
+#     # We want to ignore the noise at the top, so we keep only "significant" lines.
+#     significant_contours = []
+#     for c in contours:
+#         # If the line is long enough (e.g., > 50 pixels), it's part of the board
+#         if cv2.arcLength(c, True) > 50:
+#             significant_contours.append(c)
 
-    if not significant_contours:
-        return 0, None
+#     if not significant_contours:
+#         return 0, None
 
-    # THE TRICK: Stack all points from all significant lines into one big array
-    all_points = np.vstack(significant_contours)
+#     # THE TRICK: Stack all points from all significant lines into one big array
+#     all_points = np.vstack(significant_contours)
 
-    # 6. Find the "Minimum Area Rectangle" that encloses this cloud of points
-    rect = cv2.minAreaRect(all_points)
+#     # 6. Find the "Minimum Area Rectangle" that encloses this cloud of points
+#     rect = cv2.minAreaRect(all_points)
     
-    # rect returns ((center_x, center_y), (width, height), angle)
-    (x, y), (w, h), angle = rect
+#     # rect returns ((center_x, center_y), (width, height), angle)
+#     (x, y), (w, h), angle = rect
 
-    # --- FORCING SQUARE GEOMETRY ---
-    # Since the tablecloth is "extending" the box, the LONGER side is the wrong one.
-    # The SHORTER side is likely the true width of the board.
-    side_length = min(w, h)
+#     # --- FORCING SQUARE GEOMETRY ---
+#     # Since the tablecloth is "extending" the box, the LONGER side is the wrong one.
+#     # The SHORTER side is likely the true width of the board.
+#     side_length = min(w, h)
     
-    # Create a new rect tuple with the same center and angle, but square dimensions
-    square_rect = ((x, y), (side_length, side_length), angle)
-    # -------------------------------
+#     # Create a new rect tuple with the same center and angle, but square dimensions
+#     square_rect = ((x, y), (side_length, side_length), angle)
+#     # -------------------------------
 
-    # 7. Convert to a box contour for drawing
-    box = cv2.boxPoints(square_rect)
-    box = np.int32(box)
+#     # 7. Convert to a box contour for drawing
+#     box = cv2.boxPoints(square_rect)
+#     box = np.int32(box)
 
-    return side_length, box
+#     return side_length, box
 
-# --- Usage ---
-# Replace with your actual image path
-image = cv2.imread('e88_autopilot/landing pad templates/ludo-board.jpg')
+# # --- Usage ---
+# # Replace with your actual image path
+# image = cv2.imread('e88_autopilot/landing pad templates/ludo2.jpg')
 
-if image is None:
-    print("Error: Image not found.")
-else:
-    width_px, box = find_board_square_forced(image)
+# if image is None:
+#     print("Error: Image not found.")
+# else:
+#     width_px, box = find_board_square_forced(image)
 
-    if box is not None:
-        cv2.drawContours(image, [box], 0, (0, 255, 0), 2)
-        print(f"Detected Square Side: {width_px:.2f} px")
-        cv2.imshow("Forced Square Detection", image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+#     if box is not None:
+#         cv2.drawContours(image, [box], 0, (0, 255, 0), 2)
+#         print(f"Detected Square Side: {width_px:.2f} px")
+#         cv2.imshow("Forced Square Detection", image)
+#         cv2.waitKey(0)
+#         cv2.destroyAllWindows()

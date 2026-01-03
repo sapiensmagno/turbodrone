@@ -41,6 +41,7 @@ Phase 0 focuses on making the estimator and control loop inspectable:
   - [6.4 Motion-quality / safety gates](#64-motion-quality--safety-gates)
   - [6.5 PID-like controller parameters](#65-pid-like-controller-parameters)
   - [6.6 Sign conventions (roll_sign, pitch_sign)](#66-sign-conventions-roll_sign-pitch_sign)
+  - [6.7 Visual scale (reference detection)](#67-visual-scale-reference-detection)
 - [7. Telemetry and visualization](#7-telemetry-and-visualization)
 - [7.1 Understanding the key metrics (recommended reading)](#71-understanding-the-key-metrics-recommended-reading)
 - [8. Known challenges and mitigations](#8-known-challenges-and-mitigations)
@@ -70,8 +71,14 @@ python -m e88_qt.app
 
 In the UI:
 
-- Chose camera. Switch between them to reset the stream if you experience video issues. They may happen due to RTSP over UDP (packet loss/jitter)
+- Chose camera. Camera 2 is facing down so it is preferred. Switch between them to reset the stream if you experience video issues. They may happen due to RTSP over UDP (packet loss/jitter)
 - Configure parameters in the **Autostabilizer** section.
+- In **Visual Scale**:
+  - Select a saved Reference (or Capture one).
+  - Choose **Detection** method if you're not using ArUco markers:
+    - `ORB + Contours` (default)
+    - `Closed Quad`
+  - Click **Calibrate altitude** for the selected Reference.
 - Click **Start autostabilizer**.
 
 ### 1.2 Run from CLI (headless-ish)
@@ -472,6 +479,113 @@ If the drone corrects in the wrong direction:
 
 - flip `roll_sign` from `-1` to `+1`, or
 - flip `pitch_sign` from `-1` to `+1`.
+
+### 6.7 Visual scale (reference detection)
+
+Visual scale is enabled by `enable_visual_scale=True` and uses a saved **Reference** image to:
+
+- Detect the reference object in the live frame.
+- Estimate the reference object’s apparent size in pixels (`ref_size_px`).
+- Convert between px/s and m/s using the saved physical pad dimensions.
+
+Key parameters:
+
+- `reference_id: Optional[str] = None`
+  - Selected reference record (from the reference store).
+
+- `visual_scale_detection_method: str = "orb_contours"`
+  - Selects the detection backend used by `ReferenceDetector`.
+  - In the Qt UI this is the **Visual Scale → Detection** dropdown.
+
+#### 6.7.1 Detection method overview
+
+The detector returns a `ReferenceDetectionResult` with:
+
+- `detected`: whether a reference was found
+- `quad_xy`: a 4-point quadrilateral (image coordinates) when detected
+- `ref_width_px`, `ref_height_px`, `ref_size_px`: geometric size estimates derived from `quad_xy`
+- `mode`: which backend produced the result
+
+The implementation lives in `e88_autopilot/reference_detection.py`.
+
+#### 6.7.2 Method: ORB + Contours (`visual_scale_detection_method="orb_contours"`)
+
+This is the default method and is meant to work with a generic printed reference image.
+
+Step-by-step:
+
+1. **ORB features on the stored reference**
+   - When the detector is created, it computes ORB keypoints/descriptors for the saved `reference_bgr`.
+
+2. **ORB features on the live frame**
+   - Each update computes ORB keypoints/descriptors on the incoming frame.
+
+3. **Descriptor matching (KNN + ratio test)**
+   - Uses `BFMatcher(NORM_HAMMING)` with `knnMatch(k=2)`.
+   - Applies a Lowe-style ratio test (keeps matches where `m.distance < 0.75 * n.distance`).
+
+4. **Homography estimation (RANSAC)**
+   - Uses `cv2.findHomography(..., cv2.RANSAC, ransacReprojThreshold=5.0)`.
+   - Rejects detections if the number of inliers or inlier ratio is too small.
+
+5. **Project the reference corners into the frame**
+   - The reference image rectangle corners are projected with `cv2.perspectiveTransform`.
+   - The resulting quadrilateral becomes `quad_xy`.
+
+If ORB/homography fails (insufficient matches/inliers), it falls back to a contour-based estimate:
+
+- **Contour fallback (“square-ish board”)**
+  - Converts to grayscale, blurs, runs Canny.
+  - Dilates edges slightly.
+  - Finds external contours.
+  - Stacks “significant” contours (by arc-length threshold) and fits a `minAreaRect`.
+  - Forces that rectangle to a square (side = min(w, h)) and returns it as `quad_xy`.
+
+Notes:
+
+- ORB is good when the reference image has texture (corners/unique patterns).
+- The contour fallback is a heuristic: it can lock onto other large square-ish objects if the scene has them.
+- `mode` is reported as `"orb"` when homography succeeds, else `"contours"` when the fallback is used.
+
+#### 6.7.3 Method: Closed Quad (`visual_scale_detection_method="closed_quad"`)
+
+This method does *not* rely on keypoints/descriptors. It tries to find a big quadrilateral “board-like” shape.
+
+Step-by-step:
+
+1. Convert to grayscale and blur
+2. Run Canny edge detection
+3. **Morphological closing**
+   - Applies `cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)` to connect broken edges.
+4. Find contours (`cv2.RETR_TREE`)
+5. Consider the largest contours (by area) and approximate polygons
+   - Uses `cv2.approxPolyDP(contour, eps_frac * perimeter, True)`.
+   - Accepts the first contour whose approximation has exactly 4 vertices.
+6. Fit a min-area rectangle to that quad and use its `boxPoints` as `quad_xy`
+
+Notes:
+
+- This is often more robust than ORB when the reference has low texture but strong edges.
+- It is sensitive to scene clutter: any large quad-like contour may be selected.
+- `mode` is reported as `"closed_quad"`.
+
+#### 6.7.4 Method: Markers (`mode="markers"`)
+
+This mode is intended for references that include **ArUco markers**.
+
+Step-by-step:
+
+1. Convert to grayscale
+2. Detect markers using OpenCV’s ArUco module
+   - `cv2.aruco.detectMarkers(gray, DICT_4X4_50)`
+3. If fewer than 4 markers are found, detection fails.
+4. Concatenate all marker corner points and compute a convex hull.
+5. Fit a minimum-area rectangle to the hull (`minAreaRect` + `boxPoints`) and return it as `quad_xy`.
+
+Important behavior:
+
+- If a saved reference record has `markers_present=True`, the visual-scale pipeline forces marker detection.
+  - This overrides the UI’s `orb_contours` / `closed_quad` selection to preserve marker-based references.
 
 ---
 

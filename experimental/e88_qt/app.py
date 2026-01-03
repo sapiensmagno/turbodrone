@@ -645,6 +645,20 @@ class E88QtControllerWindow(QMainWindow):
         ref_buttons_row.addStretch(1)
         self.visual_scale_form.addRow("", ref_buttons_row)
 
+        self.cfg_ref_detect_method = QComboBox()
+        self.cfg_ref_detect_method.addItem("ORB + Contours", "orb_contours")
+        self.cfg_ref_detect_method.addItem("Closed Quad", "closed_quad")
+        last_method = str(self._settings.value("visual_scale/detection_method", "orb_contours") or "orb_contours")
+        idx = self.cfg_ref_detect_method.findData(last_method)
+        if idx >= 0:
+            self.cfg_ref_detect_method.setCurrentIndex(idx)
+        self.cfg_ref_detect_method.currentIndexChanged.connect(
+            lambda *_args: self._settings.setValue(
+                "visual_scale/detection_method", str(self.cfg_ref_detect_method.currentData() or "orb_contours")
+            )
+        )
+        self.visual_scale_form.addRow("Detection", self.cfg_ref_detect_method)
+
         self.cfg_use_m_s_control = QCheckBox()
         self.cfg_use_m_s_control.setChecked(bool(cfg_defaults.use_m_s_control))
         self.visual_scale_form.addRow("Use m/s control", self.cfg_use_m_s_control)
@@ -1012,7 +1026,12 @@ class E88QtControllerWindow(QMainWindow):
             return
 
         try:
-            est = VisualScaleEstimator(record=record, reference_image_bgr=img, stable_required_frames=1)
+            est = VisualScaleEstimator(
+                record=record,
+                reference_image_bgr=img,
+                detection_method=str(self.cfg_ref_detect_method.currentData() or "orb_contours"),
+                stable_required_frames=1,
+            )
             scale = est.update(frame_bgr=frame, timestamp=float(time.monotonic()), vx_px_s=0.0, vy_px_s=0.0)
         except Exception as e:
             QMessageBox.warning(self, "Calibration", f"Detection failed: {type(e).__name__}: {e}")
@@ -1199,6 +1218,7 @@ class E88QtControllerWindow(QMainWindow):
             pitch_sign=float(self.cfg_pitch_sign.value()),
             enable_visual_scale=True,
             reference_id=self._selected_reference_id(),
+            visual_scale_detection_method=str(self.cfg_ref_detect_method.currentData() or "orb_contours"),
             use_m_s_control=bool(self.cfg_use_m_s_control.isChecked()),
         )
 

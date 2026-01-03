@@ -47,6 +47,7 @@ class StabilizerConfig:
 
     enable_visual_scale: bool = False
     reference_id: Optional[str] = None
+    visual_scale_detection_method: str = "orb_contours"
     use_m_s_control: bool = True
     kp_vx_m_s: float = 1.5
     kp_vy_m_s: float = 1.5
@@ -274,6 +275,7 @@ class AutoStabilizer:
         self._visual_scale = VisualScaleEstimator(
             record=record,
             reference_image_bgr=img,
+            detection_method=str(self._cfg.visual_scale_detection_method),
             stable_required_frames=int(self._cfg.visual_scale_stable_frames),
             max_ref_size_frac_per_sec=float(self._cfg.visual_scale_max_ref_size_frac_per_sec),
         )
