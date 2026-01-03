@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -474,6 +475,10 @@ class E88QtControllerWindow(QMainWindow):
         top_row.addStretch(1)
         self.layout.addLayout(top_row)
 
+        self.status_label = QLabel("")
+        self.status_label.setTextFormat(Qt.PlainText)
+        self.layout.addWidget(self.status_label)
+
         video_row = QHBoxLayout()
 
         self.traj_widget = _TrajectoryWidget(self)
@@ -488,7 +493,7 @@ class E88QtControllerWindow(QMainWindow):
 
         self.layout.addLayout(video_row)
 
-        bottom_row = QHBoxLayout()
+        bottom_grid = QGridLayout()
 
         self.autopilot_cfg_group = QGroupBox("Autostabilizer")
         self.autopilot_cfg_form_left = QFormLayout()
@@ -627,16 +632,18 @@ class E88QtControllerWindow(QMainWindow):
         self.visual_scale_group = QGroupBox("Visual Scale")
         self.visual_scale_form = QFormLayout(self.visual_scale_group)
 
-        ref_row = QHBoxLayout()
         self.cfg_reference_id = QComboBox()
+        self.visual_scale_form.addRow("Reference", self.cfg_reference_id)
+
+        ref_buttons_row = QHBoxLayout()
         self.cfg_reference_reload = QPushButton("Reload")
         self.cfg_reference_reload.clicked.connect(self._reload_references)
         self.cfg_reference_delete = QPushButton("Delete")
         self.cfg_reference_delete.clicked.connect(self._delete_selected_reference)
-        ref_row.addWidget(self.cfg_reference_id)
-        ref_row.addWidget(self.cfg_reference_reload)
-        ref_row.addWidget(self.cfg_reference_delete)
-        self.visual_scale_form.addRow("Reference", ref_row)
+        ref_buttons_row.addWidget(self.cfg_reference_reload)
+        ref_buttons_row.addWidget(self.cfg_reference_delete)
+        ref_buttons_row.addStretch(1)
+        self.visual_scale_form.addRow("", ref_buttons_row)
 
         self.cfg_use_m_s_control = QCheckBox()
         self.cfg_use_m_s_control.setChecked(bool(cfg_defaults.use_m_s_control))
@@ -691,9 +698,6 @@ class E88QtControllerWindow(QMainWindow):
         self.ref_status_label.setTextFormat(Qt.PlainText)
         self.visual_scale_form.addRow("Status", self.ref_status_label)
 
-        bottom_row.addWidget(self.autopilot_cfg_group)
-        bottom_row.addWidget(self.visual_scale_group)
-
         self.keyboard_help_group = QGroupBox("Keyboard")
         self.keyboard_help_label = QLabel()
         self.keyboard_help_label.setTextFormat(Qt.PlainText)
@@ -702,7 +706,8 @@ class E88QtControllerWindow(QMainWindow):
         help_layout.addWidget(self.keyboard_help_label)
         self._update_keyboard_help()
 
-        bottom_row.addWidget(self.keyboard_help_group)
+        bottom_grid.addWidget(self.autopilot_cfg_group, 0, 0)
+        bottom_grid.addWidget(self.visual_scale_group, 0, 1)
 
         self.diagnostics_group = QGroupBox("Diagnostics")
         self.diagnostics_form = QFormLayout(self.diagnostics_group)
@@ -787,6 +792,9 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_ref_stats_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("ref stats", self.diag_ref_stats_label)
 
+        bottom_grid.addWidget(self.diagnostics_group, 0, 2, 2, 1)
+        bottom_grid.addWidget(self.keyboard_help_group, 1, 0, 1, 2)
+
         self.sign_flow_cb = QCheckBox("Flow sign OK")
         self.sign_flow_cb.setTristate(True)
         self.sign_flow_cb.setCheckState(Qt.PartiallyChecked)
@@ -795,23 +803,16 @@ class E88QtControllerWindow(QMainWindow):
         self.sign_control_cb = QCheckBox("Control sign OK")
         self.sign_control_cb.setTristate(True)
         self.sign_control_cb.setCheckState(Qt.PartiallyChecked)
+
         self.diagnostics_form.addRow("", self.sign_control_cb)
 
         self.sign_notes_edit = QLineEdit()
+        self.sign_notes_edit.setText("")
         self.diagnostics_form.addRow("Notes", self.sign_notes_edit)
 
-        self.sign_save_button = QPushButton("Save sign verification")
+        self.sign_save_button = QPushButton("Save")
         self.sign_save_button.clicked.connect(self._save_sign_verification)
         self.diagnostics_form.addRow("", self.sign_save_button)
-
-        bottom_row.addWidget(self.diagnostics_group)
-
-        self.layout.addLayout(bottom_row)
-
-        self.status_label = QLabel("")
-        self.layout.addWidget(self.status_label)
-
-        self.setFocusPolicy(Qt.StrongFocus)
 
         self._sc_toggle_autopilot = QShortcut(QKeySequence("P"), self)
         self._sc_toggle_autopilot.activated.connect(self._toggle_autopilot)
@@ -826,6 +827,8 @@ class E88QtControllerWindow(QMainWindow):
         self._autopilot_timer = QTimer(self)
         self._autopilot_timer.timeout.connect(self._tick_autopilot)
         self._autopilot_timer.start(30)
+
+        self.layout.addLayout(bottom_grid)
 
         self._control_timer = QTimer(self)
         self._control_timer.timeout.connect(self._tick_controls)
@@ -915,7 +918,7 @@ class E88QtControllerWindow(QMainWindow):
 
         if record.calibration_height_m is not None and record.calibration_ref_size_px is not None:
             self.ref_status_label.setText(
-                f"Selected {ref_id}: calibrated height={float(record.calibration_height_m):.2f}m ref_size_px={float(record.calibration_ref_size_px):.1f}"
+                f"Selected {ref_id}: \ncalibrated height={float(record.calibration_height_m):.2f}m ref_size_px={float(record.calibration_ref_size_px):.1f}"
             )
         else:
             self.ref_status_label.setText(f"Selected {ref_id}: not calibrated")
@@ -1380,26 +1383,45 @@ class E88QtControllerWindow(QMainWindow):
         self._calibration_worker = None
 
     def _update_keyboard_help(self) -> None:
-        self.keyboard_help_label.setText(
-            "Manual control (disabled during autopilot):\n"
-            "  Arrow keys: roll/pitch\n"
-            "  W/S: throttle up/down\n"
-            "  A/D: yaw left/right\n"
-            "\n"
-            "Actions:\n"
-            "  Z: takeoff\n"
-            "  X: land\n"
-            "  C: calibrate gyro\n"
-            "  1/2: switch camera\n"
-            "  H: toggle headless\n"
-            "  F: flip\n"
-            "\n"
-            "Autopilot:\n"
-            "  P: start/stop autostabilizer\n"
-            "\n"
-            "Emergency:\n"
-            "  Esc: emergency land (also stops autostabilizer)"
-        )
+        manual = [
+            "Arrow keys: roll/pitch",
+            "W/S: throttle up/down",
+            "A/D: yaw left/right",
+        ]
+        actions = [
+            "Z: takeoff",
+            "X: land",
+            "C: calibrate gyro",
+            "1/2: switch camera",
+            "H: toggle headless",
+            "F: flip",
+            "P: start/stop autostabilizer",
+        ]
+        emergency = [
+            "Esc: emergency land (also stops autostabilizer)",
+        ]
+
+        w0 = 34
+        w1 = 30
+
+        def _col(s: str, w: int) -> str:
+            s2 = str(s)
+            if len(s2) > w:
+                s2 = s2[: max(0, w - 1)] + "…"
+            return s2.ljust(w)
+
+        rows = max(len(manual), len(actions), len(emergency))
+        lines = []
+        lines.append(_col("Manual control", w0) + "  " + _col("Actions", w1) + "  " + "Emergency")
+        lines.append(_col("(disabled during autopilot)", w0) + "  " + _col("", w1) + "  " + "")
+        lines.append("")
+        for i in range(rows):
+            m = manual[i] if i < len(manual) else ""
+            a = actions[i] if i < len(actions) else ""
+            e = emergency[i] if i < len(emergency) else ""
+            lines.append(_col(m, w0) + "  " + _col(a, w1) + "  " + e)
+
+        self.keyboard_help_label.setText("\n".join(lines))
 
     def _toggle_autopilot(self) -> None:
         if self._calibration_running:
