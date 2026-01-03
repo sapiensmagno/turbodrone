@@ -198,19 +198,73 @@ When disabled (`use_kalman=False`):
 
 ### 4.4 Controller: turning drift into roll/pitch
 
-Once we have an estimate of drift velocity:
+This project controls **image-plane drift**.
 
-- If the scene appears to move right, the drone is drifting left (or equivalently, the camera is moving left relative to scene).
-- We send the opposite command to counteract.
+#### 4.4.1 Coordinate conventions (what `vx`/`vy` actually mean)
 
-The controller in this project (`VelocityHoldController`) behaves like a small PID-family controller:
+The optical flow layer (`optical_flow.py`) estimates a translation `(dx_px, dy_px)` between consecutive frames:
 
-- Proportional term: `u ~ kp * v`
-- Integral term: `u ~ ki * ∫ v dt`
-- Deadband: ignore tiny velocities
-- Saturation: clamp output to `[-max_cmd, +max_cmd]`
+- `dx_px > 0`: tracked features moved **to the right** in the raw camera frame.
+- `dy_px > 0`: tracked features moved **down** in the raw camera frame.
 
-We do not currently include a derivative term.
+Then:
+
+- `vx_px_s = dx_px / dt_sec`
+- `vy_px_s = dy_px / dt_sec`
+
+Important implications:
+
+- These are in **raw camera pixel coordinates** (OpenCV convention), not “world forward/right”.
+- The Qt video preview is rotated for display, but the stabilizer computes flow on the raw frame.
+- The trajectory widget draws `pos_y_px` with the usual Cartesian convention (positive up on screen), but the *data* still comes from OpenCV’s `dy` (positive down). The widget flips the vertical axis when drawing.
+
+So if you observe “moving the drone right produces positive `pos_y_px`”, that means your **right/left physical motion is currently showing up mostly in `vy`** (image vertical drift), which typically indicates a 90° rotation between the camera image axes and your intuitive “right/left” axis.
+
+#### 4.4.2 Mapping from drift velocity to roll/pitch commands
+
+The mapping is implemented in `controller.py` (`VelocityHoldController`). It is **not cross-coupled**:
+
+- **Roll command depends only on `vx`**
+- **Pitch command depends only on `vy`**
+
+Specifically (PI controller per axis):
+
+- Apply deadband:
+  - `vx = 0` if `abs(vx_px_s) < deadband`
+  - `vy = 0` if `abs(vy_px_s) < deadband`
+- Integrate (with clamp):
+  - `ivx = clamp(ivx + vx * dt, -integrator_limit, +integrator_limit)`
+  - `ivy = clamp(ivy + vy * dt, -integrator_limit, +integrator_limit)`
+- PI “raw” commands:
+  - `u_roll  = kp_vx * vx + ki_vx * ivx`
+  - `u_pitch = kp_vy * vy + ki_vy * ivy`
+- Apply configurable sign flips (to handle camera/drone orientation differences):
+  - `roll  = clamp(roll_sign  * u_roll,  -max_cmd, +max_cmd)`
+  - `pitch = clamp(pitch_sign * u_pitch, -max_cmd, +max_cmd)`
+
+There is currently **no axis swap** option in code (no “use `vy` for roll” / “use `vx` for pitch”).
+That means:
+
+- If right/left drift shows up in `vy`, the controller will try to correct it with **pitch**, not roll.
+- Fixing this requires either:
+  - changing the camera orientation / how frames are fed to the flow estimator, or
+  - adding an explicit axis swap/remap in the controller or estimator.
+
+#### 4.4.3 When and for how long commands are applied
+
+Commands are recomputed and sent continuously in the main loop (see `autostabilizer.py`) at approximately:
+
+- `cmd_rate_hz` (default `20 Hz`)
+
+How long compensation persists:
+
+- The PI controller runs every loop and outputs the current roll/pitch.
+- The **integrator has memory**: even if `vx`/`vy` later fall into the deadband (become 0), the integrator terms (`ivx`/`ivy`) keep their current value and can keep producing some command.
+- The integrators are reset only when:
+  - `quality < min_quality` (controller returns `None` and calls `reset()`), or
+  - the stabilizer is (re)activated (`activate()` resets controllers).
+
+So you should expect commands to be applied continuously while drift is present, and to “linger” according to the integral term unless quality drops or you reset.
 
 ---
 
