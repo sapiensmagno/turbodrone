@@ -142,6 +142,17 @@ class _AutostabilizerWorker(QThread):
         self._session_recorder = SessionRecorder(base_dir=self._recordings_dir)
 
         meta = build_default_meta(cfg=self._cfg, net_rtt_ms=self._net_rtt_ms, mode="qt_autostabilizer")
+
+        ref_id = getattr(self._cfg, "reference_id", None)
+        if ref_id is not None:
+            try:
+                record = ReferenceStore().load(str(ref_id))
+                if record is not None:
+                    meta["pad_type"] = str(record.pad_type)
+                    meta["pad_dimensions_m"] = [float(record.pad_width_m), float(record.pad_height_m)]
+            except Exception:
+                pass
+
         meta["sign_verification"] = self._build_sign_verification(updated_at=None)
         self._session_dir = self._session_recorder.start(meta=meta)
 

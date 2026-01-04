@@ -80,6 +80,7 @@ In the UI:
     - `Closed Quad`
   - Click **Calibrate altitude** for the selected Reference.
 - Click **Start autostabilizer**.
+- **Emergency land**: click **EMERGENCY LAND** (or press `Esc`) to stop the autostabilizer and then request a land command to the drone.
 
 ### 1.2 Run from CLI (headless-ish)
 

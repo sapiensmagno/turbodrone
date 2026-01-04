@@ -284,7 +284,7 @@
  
  ---
  
- ## Phase 1 — Altitude Estimation + Scale Normalization (px/s → m/s)
+ ## Phase 1 — Altitude Estimation + Scale Normalization (px/s → m/s) [DONE 2026-01-03]
  
  ### Objectives
  - Solve the scale ambiguity problem: make optical-flow-based velocity usable in physical units.
