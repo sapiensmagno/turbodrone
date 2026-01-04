@@ -479,6 +479,33 @@ If the drone corrects in the wrong direction:
 - flip `roll_sign` from `-1` to `+1`, or
 - flip `pitch_sign` from `-1` to `+1`.
 
+#### 6.6.1 UI sign verification (Flow sign OK / Control sign OK)
+
+The Qt UI includes two tri-state checkboxes in **Diagnostics**:
+
+- **Flow sign OK**
+  - Meaning: you have manually verified that the *reported* drift direction (from optical flow) matches what you expect when you intentionally move the drone.
+  - How to use:
+    - With the drone on the ground (motors off) or at a safe low altitude, move it slightly:
+      - move the drone to the **right** and confirm the drift indicator/trajectory moves in the expected direction,
+      - move the drone **forward** and confirm the drift indicator/trajectory moves in the expected direction.
+    - If directions look mirrored or swapped, fix the camera/axis/sign settings before trying to tune gains.
+
+- **Control sign OK**
+  - Meaning: you have manually verified that the *controller output* (roll/pitch compensation) pushes the drone in the correct direction to counteract the observed drift.
+  - How to use:
+    - Start the autostabilizer.
+    - Introduce a small drift (or gently translate the drone) and confirm the command arrow/telemetry indicates a corrective command (opposes the drift).
+    - If it reinforces the drift (wrong-way correction), adjust `roll_sign` / `pitch_sign` (see above).
+
+Tri-state semantics:
+
+- Checked: `true` (verified OK)
+- Unchecked: `false` (verified NOT OK)
+- Partially checked: `null` (unknown / not verified yet)
+
+When you click **Save**, these values (plus the **Notes** field) are stored in the session recording `meta.json` under `sign_verification`. This is meant to make recorded sessions self-describing (so you know later whether a run was done with the correct sign conventions).
+
 ### 6.7 Visual scale (reference detection)
 
 Visual scale is enabled by `enable_visual_scale=True` and uses a saved **Reference** image to:
@@ -503,7 +530,79 @@ Key parameters:
     - Values `< 1.0` reduce authority until the reference becomes stable (and m/s control can take over).
   - In the Qt UI this is **Visual Scale → Unstable cmd scale**.
 
-#### 6.7.1 Detection method overview
+#### 6.7.1 m/s control
+
+The **Use m/s control** checkbox controls whether the stabilizer is allowed to use the metric velocity estimate from visual scale.
+
+Behavior:
+
+- If **Use m/s control is OFF**:
+  - The controller always runs in **px/s** (pixel velocity) mode.
+  - Visual scale can still run for diagnostics/telemetry, but it will not change the control units.
+
+- If **Use m/s control is ON**:
+  - The controller uses **m/s** *only when* visual scale is considered **stable**.
+  - In code, m/s control is enabled only when all of these are true:
+    - `enable_visual_scale=True`
+    - `use_m_s_control=True`
+    - `scale_stable=True` (visual scale stability gate)
+    - `vx_m_s` and `vy_m_s` are available (not `None`)
+
+Fallback semantics (important):
+
+- Even if the reference is detected once, **m/s control is not “latched”**.
+- If the reference is lost or the detector becomes inconsistent such that `scale_stable` becomes false, the stabilizer will **immediately fall back to px/s control**.
+
+Command scaling during fallback:
+
+- When **Use m/s control is ON** but m/s control is not active (because scale is not stable yet / was lost), the roll/pitch output is multiplied by `visual_scale_unstable_cmd_scale`.
+- This lets you choose between:
+  - full authority while scale is unstable (`1.0`), or
+  - reduced authority until scale stabilizes (`< 1.0`).
+
+#### 6.7.2 Visual scale stability gate (what `scale_stable` means)
+
+Visual scale exposes a boolean `stable` flag (surfaced in telemetry as `scale_stable`).
+This flag is a **gate** that decides whether the system is allowed to use m/s control.
+
+The stability gate is intentionally conservative: it is trying to ensure that the detected reference size is not “jumping around” due to false detections or bad matches.
+
+Step-by-step (per frame):
+
+- A detection is considered **accepted** when:
+  - the detector reports `detected=True`, and
+  - `ref_size_px > 0`.
+
+- If there was a previous accepted detection, the new detection is additionally checked for **size change consistency**:
+  - Compute the per-second relative change of `ref_size_px`:
+    - `frac_per_sec = abs(cur - prev) / prev / dt`
+  - If `frac_per_sec` exceeds `visual_scale_max_ref_size_frac_per_sec`, the detection is **rejected** for this frame.
+    - This rejects sudden scale jumps (often caused by wrong quad, wrong homography, or latching to a different object).
+
+- If the detection is accepted:
+  - An internal counter `stable_seen` is incremented.
+  - `scale_stable=True` only when `stable_seen >= visual_scale_stable_frames`.
+
+- If the detection is not accepted (not detected or rejected by the jump gate):
+  - `stable_seen` is reset to `0`.
+  - `scale_stable=False` immediately.
+
+Important implications:
+
+- Stability requires **consecutive** accepted detections.
+- If the reference is intermittently lost (or detections are unstable), `scale_stable` will flap and m/s control will repeatedly fall back to px/s.
+
+Tuning knobs (see config reference):
+
+- `visual_scale_stable_frames`
+  - How many consecutive accepted frames are required before declaring stable.
+  - Larger values reduce false “stable” but increase the time-to-m/s.
+
+- `visual_scale_max_ref_size_frac_per_sec`
+  - Maximum allowed relative scale change rate before rejecting the detection.
+  - Larger values are more permissive (can stabilize sooner), but may allow bad detections to be treated as stable.
+
+#### 6.7.3 Detection method overview
 
 The detector returns a `ReferenceDetectionResult` with:
 
@@ -514,7 +613,7 @@ The detector returns a `ReferenceDetectionResult` with:
 
 The implementation lives in `e88_autopilot/reference_detection.py`.
 
-#### 6.7.2 Method: ORB + Contours (`visual_scale_detection_method="orb_contours"`)
+#### 6.7.4 Method: ORB + Contours (`visual_scale_detection_method="orb_contours"`)
 
 This is the default method and is meant to work with a generic printed reference image.
 
@@ -553,7 +652,7 @@ Notes:
 - The contour fallback is a heuristic: it can lock onto other large square-ish objects if the scene has them.
 - `mode` is reported as `"orb"` when homography succeeds, else `"contours"` when the fallback is used.
 
-#### 6.7.3 Method: Closed Quad (`visual_scale_detection_method="closed_quad"`)
+#### 6.7.5 Method: Closed Quad (`visual_scale_detection_method="closed_quad"`)
 
 This method does *not* rely on keypoints/descriptors. It tries to find a big quadrilateral “board-like” shape.
 
