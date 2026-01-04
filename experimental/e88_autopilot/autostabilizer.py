@@ -54,6 +54,7 @@ class StabilizerConfig:
     ki_vx_m_s: float = 0.25
     ki_vy_m_s: float = 0.25
     deadband_m_s: float = 0.02
+    visual_scale_unstable_cmd_scale: float = 1.0
     visual_scale_stable_frames: int = 8
     visual_scale_max_ref_size_frac_per_sec: float = 2.0
 
@@ -745,7 +746,7 @@ class AutoStabilizer:
 
                 cmd_scale = 1.0
                 if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and (not use_m_s):
-                    cmd_scale = 0.35
+                    cmd_scale = float(self._cfg.visual_scale_unstable_cmd_scale)
                 t_ctrl_end = float(time.monotonic())
                 if out is None:
                     cmd_roll = 0.0

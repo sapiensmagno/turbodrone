@@ -663,6 +663,13 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_use_m_s_control.setChecked(bool(cfg_defaults.use_m_s_control))
         self.visual_scale_form.addRow("Use m/s control", self.cfg_use_m_s_control)
 
+        self.cfg_visual_scale_unstable_cmd_scale = QDoubleSpinBox()
+        self.cfg_visual_scale_unstable_cmd_scale.setRange(0.0, 1.0)
+        self.cfg_visual_scale_unstable_cmd_scale.setSingleStep(0.05)
+        self.cfg_visual_scale_unstable_cmd_scale.setDecimals(2)
+        self.cfg_visual_scale_unstable_cmd_scale.setValue(float(cfg_defaults.visual_scale_unstable_cmd_scale))
+        self.visual_scale_form.addRow("Unstable cmd scale", self.cfg_visual_scale_unstable_cmd_scale)
+
         self.ref_pad_type = QLineEdit()
         self.ref_pad_type.setText("pad")
         self.visual_scale_form.addRow("Pad type", self.ref_pad_type)
@@ -1220,6 +1227,7 @@ class E88QtControllerWindow(QMainWindow):
             reference_id=self._selected_reference_id(),
             visual_scale_detection_method=str(self.cfg_ref_detect_method.currentData() or "orb_contours"),
             use_m_s_control=bool(self.cfg_use_m_s_control.isChecked()),
+            visual_scale_unstable_cmd_scale=float(self.cfg_visual_scale_unstable_cmd_scale.value()),
         )
 
     def _start_autopilot(self) -> None:

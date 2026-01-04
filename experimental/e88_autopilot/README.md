@@ -496,6 +496,13 @@ Key parameters:
   - Selects the detection backend used by `ReferenceDetector`.
   - In the Qt UI this is the **Visual Scale → Detection** dropdown.
 
+- `visual_scale_unstable_cmd_scale: float = 1.0`
+  - A multiplier applied to roll/pitch commands **only while visual scale is enabled but not yet stable**.
+  - This is a transitional safety/feel knob:
+    - `1.0` means full authority during the “unstable scale” period, when the autopilot only knows px/s.
+    - Values `< 1.0` reduce authority until the reference becomes stable (and m/s control can take over).
+  - In the Qt UI this is **Visual Scale → Unstable cmd scale**.
+
 #### 6.7.1 Detection method overview
 
 The detector returns a `ReferenceDetectionResult` with:
