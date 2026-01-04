@@ -663,6 +663,18 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_use_m_s_control.setChecked(bool(cfg_defaults.use_m_s_control))
         self.visual_scale_form.addRow("Use m/s control", self.cfg_use_m_s_control)
 
+        self.cfg_visual_scale_ms_hold_sec = QDoubleSpinBox()
+        self.cfg_visual_scale_ms_hold_sec.setRange(0.0, 10.0)
+        self.cfg_visual_scale_ms_hold_sec.setSingleStep(0.25)
+        self.cfg_visual_scale_ms_hold_sec.setDecimals(2)
+        self.cfg_visual_scale_ms_hold_sec.setValue(
+            float(self._settings.value("visual_scale/ms_hold_sec", cfg_defaults.visual_scale_ms_hold_sec) or cfg_defaults.visual_scale_ms_hold_sec)
+        )
+        self.cfg_visual_scale_ms_hold_sec.valueChanged.connect(
+            lambda *_args: self._settings.setValue("visual_scale/ms_hold_sec", float(self.cfg_visual_scale_ms_hold_sec.value()))
+        )
+        self.visual_scale_form.addRow("m/s hold (s)", self.cfg_visual_scale_ms_hold_sec)
+
         self.cfg_visual_scale_unstable_cmd_scale = QDoubleSpinBox()
         self.cfg_visual_scale_unstable_cmd_scale.setRange(0.0, 1.0)
         self.cfg_visual_scale_unstable_cmd_scale.setSingleStep(0.05)
@@ -1228,6 +1240,7 @@ class E88QtControllerWindow(QMainWindow):
             visual_scale_detection_method=str(self.cfg_ref_detect_method.currentData() or "orb_contours"),
             use_m_s_control=bool(self.cfg_use_m_s_control.isChecked()),
             visual_scale_unstable_cmd_scale=float(self.cfg_visual_scale_unstable_cmd_scale.value()),
+            visual_scale_ms_hold_sec=float(self.cfg_visual_scale_ms_hold_sec.value()),
         )
 
     def _start_autopilot(self) -> None:

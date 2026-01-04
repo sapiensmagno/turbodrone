@@ -55,6 +55,7 @@ class StabilizerConfig:
     ki_vy_m_s: float = 0.25
     deadband_m_s: float = 0.02
     visual_scale_unstable_cmd_scale: float = 1.0
+    visual_scale_ms_hold_sec: float = 1.0
     visual_scale_stable_frames: int = 8
     visual_scale_max_ref_size_frac_per_sec: float = 2.0
 
@@ -229,6 +230,10 @@ class AutoStabilizer:
         self._visual_scale: Optional[VisualScaleEstimator] = None
         self._visual_scale_error: str = ""
 
+        self._last_stable_scale_t: Optional[float] = None
+        self._last_stable_m_per_px_x: Optional[float] = None
+        self._last_stable_m_per_px_y: Optional[float] = None
+
         self._active = False
         self._last_loop_t: Optional[float] = None
         self._loop_rate_hz_ema = 0.0
@@ -245,6 +250,9 @@ class AutoStabilizer:
         self._ctl_px.reset()
         self._ctl_m.reset()
         self._init_visual_scale()
+        self._last_stable_scale_t = None
+        self._last_stable_m_per_px_x = None
+        self._last_stable_m_per_px_y = None
         self._last_loop_t = None
         self._loop_rate_hz_ema = 0.0
         self._frame_rate_hz_ema = 0.0
@@ -718,6 +726,8 @@ class AutoStabilizer:
                     ref_quad_xy = np.asarray(scale.detection.quad_xy, dtype=np.float32).copy()
                 vx_m_s = None if scale is None else scale.vx_m_s
                 vy_m_s = None if scale is None else scale.vy_m_s
+                m_per_px_x = None if scale is None else scale.m_per_px_x
+                m_per_px_y = None if scale is None else scale.m_per_px_y
                 scale_stable = bool(False if scale is None else scale.stable)
                 ref_mode = str("") if scale is None else str(scale.detection.mode)
                 ref_n_matches = int(0 if scale is None else scale.detection.n_matches)
@@ -725,20 +735,40 @@ class AutoStabilizer:
                 ref_inlier_ratio = float(0.0 if scale is None else scale.detection.inlier_ratio)
                 ref_reproj_error_px = float(0.0 if scale is None else scale.detection.reproj_error_px)
 
+                if bool(scale_stable) and (m_per_px_x is not None) and (m_per_px_y is not None):
+                    self._last_stable_scale_t = float(ts)
+                    self._last_stable_m_per_px_x = float(m_per_px_x)
+                    self._last_stable_m_per_px_y = float(m_per_px_y)
+
+                use_ms_hold = False
+                vx_m_s_eff = vx_m_s
+                vy_m_s_eff = vy_m_s
+                hold_sec = float(self._cfg.visual_scale_ms_hold_sec)
+                if hold_sec > 0.0 and (not bool(scale_stable)):
+                    if (
+                        self._last_stable_scale_t is not None
+                        and self._last_stable_m_per_px_x is not None
+                        and self._last_stable_m_per_px_y is not None
+                        and (float(ts) - float(self._last_stable_scale_t)) <= hold_sec
+                    ):
+                        vx_m_s_eff = float(vx) * float(self._last_stable_m_per_px_x)
+                        vy_m_s_eff = float(vy) * float(self._last_stable_m_per_px_y)
+                        use_ms_hold = True
+
                 use_m_s = (
                     bool(self._cfg.enable_visual_scale)
                     and bool(self._cfg.use_m_s_control)
-                    and bool(scale_stable)
-                    and (vx_m_s is not None)
-                    and (vy_m_s is not None)
+                    and (bool(scale_stable) or bool(use_ms_hold))
+                    and (vx_m_s_eff is not None)
+                    and (vy_m_s_eff is not None)
                 )
 
                 out = None
                 if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and use_m_s:
                     out = self._ctl_m.update(
                         dt_sec=est.dt_sec,
-                        vx_px_s=float(vy_m_s),
-                        vy_px_s=float(vx_m_s),
+                        vx_px_s=float(vy_m_s_eff),
+                        vy_px_s=float(vx_m_s_eff),
                         quality=q,
                     )
                 else:
@@ -859,8 +889,8 @@ class AutoStabilizer:
                             ref_quad_xy=ref_quad_xy,
                             vx_m_s=None if vx_m_s is None else float(vx_m_s),
                             vy_m_s=None if vy_m_s is None else float(vy_m_s),
-                            used_vx_m_s=None if (not use_m_s or vx_m_s is None) else float(vx_m_s),
-                            used_vy_m_s=None if (not use_m_s or vy_m_s is None) else float(vy_m_s),
+                            used_vx_m_s=None if (not use_m_s or vx_m_s_eff is None) else float(vx_m_s_eff),
+                            used_vy_m_s=None if (not use_m_s or vy_m_s_eff is None) else float(vy_m_s_eff),
                             scale_stable=bool(scale_stable),
                             ref_mode=str(ref_mode),
                             ref_n_matches=int(ref_n_matches),

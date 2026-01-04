@@ -530,6 +530,12 @@ Key parameters:
     - Values `< 1.0` reduce authority until the reference becomes stable (and m/s control can take over).
   - In the Qt UI this is **Visual Scale → Unstable cmd scale**.
 
+- `visual_scale_ms_hold_sec: float = 1.0`
+  - A hysteresis/grace window for m/s control.
+  - When m/s control was active (stable scale) and visual scale briefly becomes unstable or the reference is lost, the stabilizer will keep using the **last stable** m/px scale for up to this duration before falling back to px/s.
+  - Set to `0.0` to disable hysteresis.
+  - In the UI this is **Visual Scale → m/s hold (s)**.
+
 #### 6.7.1 m/s control
 
 The **Use m/s control** checkbox controls whether the stabilizer is allowed to use the metric velocity estimate from visual scale.
@@ -551,7 +557,9 @@ Behavior:
 Fallback semantics (important):
 
 - Even if the reference is detected once, **m/s control is not “latched”**.
-- If the reference is lost or the detector becomes inconsistent such that `scale_stable` becomes false, the stabilizer will **immediately fall back to px/s control**.
+- If the reference is lost or the detector becomes inconsistent such that `scale_stable` becomes false:
+  - the stabilizer will keep using the **last stable** m/px scale for up to `visual_scale_ms_hold_sec`, then
+  - it falls back to px/s control.
 
 Command scaling during fallback:
 
