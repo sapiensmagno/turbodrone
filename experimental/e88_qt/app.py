@@ -719,7 +719,7 @@ class E88QtControllerWindow(QMainWindow):
         self.ref_status_label.setTextFormat(Qt.PlainText)
         self.visual_scale_form.addRow("Status", self.ref_status_label)
 
-        self.keyboard_help_group = QGroupBox("Keyboard")
+        self.keyboard_help_group = QGroupBox("")
         self.keyboard_help_label = QLabel()
         self.keyboard_help_label.setTextFormat(Qt.PlainText)
         self.keyboard_help_label.setStyleSheet("font-family: monospace;")
@@ -1412,6 +1412,7 @@ class E88QtControllerWindow(QMainWindow):
 
     def _update_keyboard_help(self) -> None:
         manual = [
+            "",
             "Arrow keys: roll/pitch",
             "W/S: throttle up/down",
             "A/D: yaw left/right",
@@ -1442,7 +1443,6 @@ class E88QtControllerWindow(QMainWindow):
         lines = []
         lines.append(_col("Manual control", w0) + "  " + _col("Actions", w1) + "  " + "Emergency")
         lines.append(_col("(disabled during autopilot)", w0) + "  " + _col("", w1) + "  " + "")
-        lines.append("")
         for i in range(rows):
             m = manual[i] if i < len(manual) else ""
             a = actions[i] if i < len(actions) else ""
