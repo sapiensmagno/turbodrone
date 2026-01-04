@@ -369,8 +369,8 @@ class _TrajectoryWidget(QWidget):
 
         base = max(50.0, max(span_x, span_y))
         arrow_len = 0.20 * base
-        dx = (self._cmd_pitch / self._max_cmd) * arrow_len
-        dy = (self._cmd_roll / self._max_cmd) * arrow_len
+        dx = (self._cmd_roll / self._max_cmd) * arrow_len
+        dy = (self._cmd_pitch / self._max_cmd) * arrow_len
         ax, ay = map_pt(cur_x + dx, cur_y + dy)
         p.setPen(QPen(QColor(255, 220, 0), 3))
         p.drawLine(int(cx), int(cy), int(ax), int(ay))
@@ -1703,7 +1703,7 @@ class E88QtControllerWindow(QMainWindow):
             )
             self._show_frame(view, rotate_90_cw=False)
 
-        self.traj_widget.add_sample(x_px=t.pos_x_px, y_px=t.pos_y_px, cmd_roll=t.cmd_roll, cmd_pitch=t.cmd_pitch)
+        self.traj_widget.add_sample(x_px=t.pos_y_px, y_px=t.pos_x_px, cmd_roll=t.cmd_roll, cmd_pitch=t.cmd_pitch)
 
     def _save_sign_verification(self) -> None:
         w = self._autopilot_worker

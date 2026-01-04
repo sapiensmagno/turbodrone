@@ -21,20 +21,20 @@ from turbodrone import Drone
 class StabilizerConfig:
     enable_takeoff: bool = False
     takeoff_throttle: float = 100.0
-    takeoff_duration_sec: float = 2.0
+    takeoff_duration_sec: float = 0.5
     climb_throttle: float = 70.0
-    climb_duration_sec: float = 1.5
-    settle_good_frames: int = 5
+    climb_duration_sec: float = 1.0
+    settle_good_frames: int = 2
 
     base_throttle: float = 50.0
     cmd_rate_hz: float = 20.0
 
     use_kalman: bool = True
     kalman_sigma_a: float = 25.0
-    kalman_sigma_v: float = 460.0
+    kalman_sigma_v: float = 1.0
 
     min_quality: float = 0.15
-    max_cmd: float = 0.8
+    max_cmd: float = 0.9
 
     kp_vx: float = 0.003
     kp_vy: float = 0.003

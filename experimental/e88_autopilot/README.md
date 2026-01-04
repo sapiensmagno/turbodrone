@@ -118,7 +118,7 @@ Important practical implications:
 At a high level, every control step does:
 
 1. **Acquire a new video frame** from the drone.
-   - In Phase 0, frame acquisition runs in a background thread and the control loop consumes the latest frame without blocking.
+   - Frame acquisition runs in a background thread and the control loop consumes the latest frame without blocking.
 2. **Track feature points** across consecutive frames (Lucas–Kanade optical flow).
 3. Estimate a single “best” global translation `(dx, dy)` between frames using **RANSAC**.
 4. Convert `(dx, dy, dt)` into velocity `(vx, vy)` in pixels/second.
@@ -223,9 +223,8 @@ Important implications:
 
 - These are in **raw camera pixel coordinates** (OpenCV convention), not “world forward/right”.
 - The Qt video preview is rotated for display, but the stabilizer computes flow on the raw frame.
-- The trajectory widget draws `pos_y_px` with the usual Cartesian convention (positive up on screen), but the *data* still comes from OpenCV’s `dy` (positive down). The widget flips the vertical axis when drawing.
-
-So if you observe “moving the drone right produces positive `pos_y_px`”, that means your **right/left physical motion is currently showing up mostly in `vy`** (image vertical drift), which typically indicates a 90° rotation between the camera image axes and your intuitive “right/left” axis.
+- The trajectory widget flips the vertical axis for display and also swaps the plotted axes so the chart is more intuitive (right/left on X, front/back on Y).
+  - This is a visualization-only convenience; the underlying `vx`/`vy` values are still raw OpenCV pixel drift.
 
 #### 4.4.2 Mapping from drift velocity to roll/pitch commands
 
