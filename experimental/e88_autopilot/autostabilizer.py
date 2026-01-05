@@ -7,6 +7,8 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
+from e88_autopilot.controller import PositionLeashController
+from e88_autopilot.controller import PositionLeashState
 from e88_autopilot.controller import VelocityHoldController
 from e88_autopilot.kalman import VelocityKalman2D
 from e88_autopilot.kalman import KalmanEstimate
@@ -48,6 +50,19 @@ class StabilizerConfig:
     estimator_deadband_px_s: float = 1.22
     roll_sign: float = -1.0
     pitch_sign: float = -1.0
+
+    enable_position_leash: bool = False
+    leash_kp_pos_px: float = 0.02
+    leash_ki_pos_px: float = 0.0
+    leash_pos_deadband_px: float = 1.0
+    leash_max_v_sp_px_s: float = 10.0
+    leash_pos_integrator_limit_px_s: float = 1000.0
+
+    leash_kp_pos_m: float = 0.5
+    leash_ki_pos_m: float = 0.0
+    leash_pos_deadband_m: float = 0.02
+    leash_max_v_sp_m_s: float = 0.25
+    leash_pos_integrator_limit_m_s: float = 10.0
 
     enable_visual_scale: bool = False
     reference_id: Optional[str] = None
@@ -120,6 +135,12 @@ class StabilizerTelemetry:
     ref_n_inliers: int = 0
     ref_inlier_ratio: float = 0.0
     ref_reproj_error_px: float = 0.0
+
+    leash_enabled: bool = False
+    leash_units: str = ""
+    leash_state: Optional[PositionLeashState] = None
+    ctl_in_vx: float = 0.0
+    ctl_in_vy: float = 0.0
 
 
 class LatestFrameBuffer:
@@ -234,6 +255,26 @@ class AutoStabilizer:
             roll_sign=self._cfg.roll_sign,
             pitch_sign=self._cfg.pitch_sign,
         )
+
+        if bool(self._cfg.enable_position_leash):
+            self._ctl_px = PositionLeashController(
+                inner=self._ctl_px,
+                kp_pos=self._cfg.leash_kp_pos_px,
+                ki_pos=self._cfg.leash_ki_pos_px,
+                pos_deadband=self._cfg.leash_pos_deadband_px,
+                max_v_sp=self._cfg.leash_max_v_sp_px_s,
+                pos_integrator_limit=self._cfg.leash_pos_integrator_limit_px_s,
+                min_quality=self._cfg.min_quality,
+            )
+            self._ctl_m = PositionLeashController(
+                inner=self._ctl_m,
+                kp_pos=self._cfg.leash_kp_pos_m,
+                ki_pos=self._cfg.leash_ki_pos_m,
+                pos_deadband=self._cfg.leash_pos_deadband_m,
+                max_v_sp=self._cfg.leash_max_v_sp_m_s,
+                pos_integrator_limit=self._cfg.leash_pos_integrator_limit_m_s,
+                min_quality=self._cfg.min_quality,
+            )
 
         self._visual_scale: Optional[VisualScaleEstimator] = None
         self._visual_scale_error: str = ""
@@ -771,16 +812,40 @@ class AutoStabilizer:
                     and (vy_m_s_eff is not None)
                 )
 
-                out = None
-                if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and use_m_s:
-                    out = self._ctl_m.update(
+                ctl_in_vx = float(vy_m_s_eff) if use_m_s else float(vy)
+                ctl_in_vy = float(vx_m_s_eff) if use_m_s else float(vx)
+
+                leash_pos_x = None
+                leash_pos_y = None
+                if k_est is not None:
+                    if use_m_s:
+                        mpx_x = self._last_stable_m_per_px_x if (not bool(scale_stable)) else m_per_px_x
+                        mpx_y = self._last_stable_m_per_px_y if (not bool(scale_stable)) else m_per_px_y
+                        if (mpx_x is not None) and (mpx_y is not None):
+                            leash_pos_x = float(k_est.y_px) * float(mpx_y)
+                            leash_pos_y = float(k_est.x_px) * float(mpx_x)
+                    else:
+                        leash_pos_x = float(k_est.y_px)
+                        leash_pos_y = float(k_est.x_px)
+
+                leash_enabled = bool(self._cfg.enable_position_leash)
+                leash_units = str("m" if use_m_s else "px") if leash_enabled else ""
+                ctl = self._ctl_m if use_m_s else self._ctl_px
+                if isinstance(ctl, PositionLeashController):
+                    out = ctl.update(
                         dt_sec=est.dt_sec,
-                        vx_px_s=float(vy_m_s_eff),
-                        vy_px_s=float(vx_m_s_eff),
+                        vx_px_s=float(ctl_in_vx),
+                        vy_px_s=float(ctl_in_vy),
+                        pos_x=leash_pos_x,
+                        pos_y=leash_pos_y,
                         quality=q,
                     )
                 else:
-                    out = self._ctl_px.update(dt_sec=est.dt_sec, vx_px_s=vy, vy_px_s=vx, quality=q)
+                    out = ctl.update(dt_sec=est.dt_sec, vx_px_s=float(ctl_in_vx), vy_px_s=float(ctl_in_vy), quality=q)
+
+                leash_state = None
+                if isinstance(ctl, PositionLeashController):
+                    leash_state = ctl.state()
 
                 cmd_scale = 1.0
                 if bool(self._cfg.enable_visual_scale) and bool(self._cfg.use_m_s_control) and (not use_m_s):
@@ -845,6 +910,11 @@ class AutoStabilizer:
                             ref_n_inliers=int(ref_n_inliers),
                             ref_inlier_ratio=float(ref_inlier_ratio),
                             ref_reproj_error_px=float(ref_reproj_error_px),
+                            leash_enabled=bool(leash_enabled),
+                            leash_units=str(leash_units),
+                            leash_state=leash_state,
+                            ctl_in_vx=float(ctl_in_vx),
+                            ctl_in_vy=float(ctl_in_vy),
                         )
                     )
                 else:
@@ -907,6 +977,11 @@ class AutoStabilizer:
                             ref_reproj_error_px=float(ref_reproj_error_px),
                             visual_scale_enabled=bool(self._cfg.enable_visual_scale),
                             visual_scale_error=str(vs_error),
+                            leash_enabled=bool(leash_enabled),
+                            leash_units=str(leash_units),
+                            leash_state=leash_state,
+                            ctl_in_vx=float(ctl_in_vx),
+                            ctl_in_vy=float(ctl_in_vy),
                         )
                     )
 

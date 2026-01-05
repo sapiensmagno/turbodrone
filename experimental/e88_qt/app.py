@@ -200,6 +200,11 @@ class _AutostabilizerWorker(QThread):
             "pos_y_px": float(t.pos_y_px),
             "flow": t.flow,
             "kalman": t.kalman,
+            "leash_enabled": bool(getattr(t, "leash_enabled", False)),
+            "leash_units": str(getattr(t, "leash_units", "")),
+            "leash_state": getattr(t, "leash_state", None),
+            "ctl_in_vx": float(getattr(t, "ctl_in_vx", 0.0)),
+            "ctl_in_vy": float(getattr(t, "ctl_in_vy", 0.0)),
             "cond_vx_px_s": float(t.kf_input_vx_px_s),
             "cond_vy_px_s": float(t.kf_input_vy_px_s),
             "cond_gated": bool(t.kf_gated),
@@ -597,6 +602,10 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_max_cmd.setValue(float(cfg_defaults.max_cmd))
         self.cfg_max_cmd.valueChanged.connect(lambda v: self.traj_widget.set_max_cmd(float(v)))
         self.autopilot_cfg_form_left.addRow("Max cmd", self.cfg_max_cmd)
+
+        self.cfg_enable_position_leash = QCheckBox()
+        self.cfg_enable_position_leash.setChecked(bool(cfg_defaults.enable_position_leash))
+        self.autopilot_cfg_form_left.addRow("Enable position leash", self.cfg_enable_position_leash)
 
         self.cfg_kp_vx = QDoubleSpinBox()
         self.cfg_kp_vx.setDecimals(6)
@@ -1276,6 +1285,7 @@ class E88QtControllerWindow(QMainWindow):
             estimator_deadband_px_s=float(self.cfg_est_deadband.value()),
             roll_sign=float(self.cfg_roll_sign.value()),
             pitch_sign=float(self.cfg_pitch_sign.value()),
+            enable_position_leash=bool(self.cfg_enable_position_leash.isChecked()),
             enable_visual_scale=True,
             reference_id=self._selected_reference_id(),
             visual_scale_detection_method=str(self.cfg_ref_detect_method.currentData() or "orb_contours"),
