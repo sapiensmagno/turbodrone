@@ -23,7 +23,7 @@ class StabilizerConfig:
     takeoff_throttle: float = 100.0
     takeoff_duration_sec: float = 0.5
     climb_throttle: float = 90.0
-    climb_duration_sec: float = 0.5
+    climb_duration_sec: float = 0.1
     settle_good_frames: int = 2
 
     base_throttle: float = 50.0
@@ -31,7 +31,7 @@ class StabilizerConfig:
 
     use_kalman: bool = True
     kalman_sigma_a: float = 25.0
-    kalman_sigma_v: float = 1.0
+    kalman_sigma_v: float = 0.5
 
     min_quality: float = 0.15
     max_cmd: float = 0.9
@@ -44,8 +44,8 @@ class StabilizerConfig:
     kp_vy: float = 0.003
     ki_vx: float = 0.0005
     ki_vy: float = 0.0005
-    deadband_px_s: float = 3.0
-    estimator_deadband_px_s: float = 3.0
+    deadband_px_s: float = 1.22
+    estimator_deadband_px_s: float = 1.22
     roll_sign: float = -1.0
     pitch_sign: float = -1.0
 
