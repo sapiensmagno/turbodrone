@@ -78,6 +78,7 @@ class _AutostabilizerWorker(QThread):
         cfg: StabilizerConfig,
         duration_sec: Optional[float],
         recordings_dir: Path,
+        selected_cam: int,
         initial_flow_sign_state: int,
         initial_control_sign_state: int,
         initial_sign_notes: str,
@@ -86,6 +87,8 @@ class _AutostabilizerWorker(QThread):
         self._drone = drone
         self._cfg = cfg
         self._duration_sec = duration_sec
+
+        self._selected_cam = int(selected_cam)
 
         self._recordings_dir = Path(recordings_dir)
         self._session_recorder: Optional[SessionRecorder] = None
@@ -142,6 +145,10 @@ class _AutostabilizerWorker(QThread):
         self._session_recorder = SessionRecorder(base_dir=self._recordings_dir)
 
         meta = build_default_meta(cfg=self._cfg, net_rtt_ms=self._net_rtt_ms, mode="qt_autostabilizer")
+
+        meta["camera"] = {
+            "selected_cam": int(self._selected_cam),
+        }
 
         ref_id = getattr(self._cfg, "reference_id", None)
         if ref_id is not None:
@@ -1175,11 +1182,11 @@ class E88QtControllerWindow(QMainWindow):
             return
 
         if key == Qt.Key_1:
-            self._drone.switch_camera(1)
+            self._select_camera(1)
             event.accept()
             return
         if key == Qt.Key_2:
-            self._drone.switch_camera(2)
+            self._select_camera(2)
             event.accept()
             return
 
@@ -1293,6 +1300,7 @@ class E88QtControllerWindow(QMainWindow):
             cfg=cfg,
             duration_sec=duration_sec,
             recordings_dir=recordings_dir,
+            selected_cam=int(self._selected_cam),
             initial_flow_sign_state=int(self.sign_flow_cb.checkState()),
             initial_control_sign_state=int(self.sign_control_cb.checkState()),
             initial_sign_notes=str(self.sign_notes_edit.text()),
