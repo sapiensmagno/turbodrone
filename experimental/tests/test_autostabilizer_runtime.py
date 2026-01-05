@@ -69,6 +69,76 @@ class TestAutoStabilizerRuntime(unittest.TestCase):
 
         self.assertGreaterEqual(len(drone.sent), 1)
 
+    def test_hold_flow_uses_monotonic_time_not_frame_timestamp(self) -> None:
+        class _StrictDtFlow:
+            def __init__(self) -> None:
+                self._last_t = None
+                self.calls = 0
+
+            def reset(self):
+                self._last_t = None
+                self.calls = 0
+
+            def last_tracks(self):
+                return None
+
+            def update(self, _frame_bgr, timestamp=None):
+                self.calls += 1
+                t = float(0.0 if timestamp is None else timestamp)
+                if self._last_t is None:
+                    self._last_t = t
+                    return None
+                dt = t - float(self._last_t)
+                self._last_t = t
+                if dt <= 1e-6:
+                    return None
+                return FlowEstimate(
+                    dt_sec=float(dt),
+                    dx_px=10.0,
+                    dy_px=0.0,
+                    vx_px_s=10.0 / float(dt),
+                    vy_px_s=0.0,
+                    quality=1.0,
+                    n_features=100,
+                    n_tracked=100,
+                    inlier_ratio=1.0,
+                    fallback_used=False,
+                )
+
+        drone = _FakeDrone()
+        cfg = StabilizerConfig(
+            enable_takeoff=False,
+            cmd_rate_hz=60.0,
+            use_kalman=False,
+            enable_visual_scale=False,
+            min_quality=0.0,
+        )
+
+        latest = []
+
+        def sink(t):
+            latest.append(t)
+
+        s = AutoStabilizer(drone, cfg=cfg, telemetry_sink=sink)
+        strict_flow = _StrictDtFlow()
+        s._flow = strict_flow  # type: ignore[attr-defined]
+
+        frame = np.zeros((120, 160, 3), dtype=np.uint8)
+        t0 = 1000.0
+        # Same frame timestamp repeated. If the stabilizer passes the frame ts to the
+        # flow estimator, it will produce dt==0 and stay None. Using monotonic time
+        # allows dt>0 even when the drone timestamp repeats.
+        drone.push(frame.copy(), t0)
+        drone.push(frame.copy(), t0)
+        drone.push(frame.copy(), t0)
+        drone.push(frame.copy(), t0)
+
+        s.activate()
+        s.run(duration_sec=0.25)
+
+        got_flow = any(getattr(t, "flow", None) is not None for t in latest)
+        self.assertTrue(got_flow)
+
     def test_visual_scale_exceptions_are_reported_in_telemetry(self) -> None:
         class _FakeFlow:
             def reset(self):

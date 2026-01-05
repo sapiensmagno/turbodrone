@@ -22,8 +22,8 @@ class StabilizerConfig:
     enable_takeoff: bool = False
     takeoff_throttle: float = 100.0
     takeoff_duration_sec: float = 0.5
-    climb_throttle: float = 70.0
-    climb_duration_sec: float = 1.0
+    climb_throttle: float = 90.0
+    climb_duration_sec: float = 0.5
     settle_good_frames: int = 2
 
     base_throttle: float = 50.0
@@ -637,7 +637,7 @@ class AutoStabilizer:
                 t_flow_start = float(time.monotonic())
                 frame_age_ms = float(max(0.0, (t_flow_start - float(ts)) * 1000.0))
                 frame_stale_ms = float(max(0.0, (t_flow_start - float(t_frame_received)) * 1000.0))
-                est = self._flow.update(frame, timestamp=ts)
+                est = self._flow.update(frame, timestamp=float(time.monotonic()))
                 t_flow_end = float(time.monotonic())
                 if est is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)

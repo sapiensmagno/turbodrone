@@ -737,6 +737,12 @@ Frame freshness fields:
   - Uses the time when the background frame thread received/decoded the frame and placed it in the size-1 buffer.
   - Mostly measures *how long the latest decoded frame sat around before the control loop used it*.
 
+Optical-flow timestamp behavior:
+
+- In `hold` phase, the optical-flow estimator’s internal `dt` is computed from local `time.monotonic()` time (control-loop time), not from the decoded frame’s `timestamp`.
+  - This avoids `dt == 0` (and thus `flow=None`) when the size-1 frame buffer reuses the same decoded frame for multiple control iterations.
+  - This does not change `frame_age_ms`, `estimated_latency_ms`, or the recorded telemetry `timestamp` field, which still refer to the decoded frame timestamp.
+
 In general you should expect `frame_age_ms >= frame_stale_ms`.
 
 Relationship between `timestamp` and `t_frame_received`:
@@ -744,12 +750,6 @@ Relationship between `timestamp` and `t_frame_received`:
 - `timestamp` is recorded in the video decode thread when a frame is read/decoded.
 - `t_frame_received` is recorded in the `LatestFrameBuffer` thread when it fetches that decoded frame and writes it into the size-1 buffer.
 
-Interpretation:
-
-- If `frame_age_ms` is large but `frame_stale_ms` is small, the delay is mostly upstream (camera/RTSP/decode).
-- If `frame_stale_ms` is large, the control loop is falling behind consumption (or frames are not arriving).
-
-Kalman conditioning fields:
 
 - `kf_input_vx_px_s`, `kf_input_vy_px_s`: the conditioned velocity actually fed into the Kalman update.
 - `kf_gated`: whether the conditioner suppressed (zeroed) at least one component due to deadband.
