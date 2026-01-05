@@ -583,6 +583,20 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_min_quality.setValue(float(cfg_defaults.min_quality))
         self.autopilot_cfg_form_left.addRow("Min quality", self.cfg_min_quality)
 
+        self.cfg_flow_motion_model = QComboBox()
+        self.cfg_flow_motion_model.addItem("Affine translation", "affine_translation")
+        self.cfg_flow_motion_model.addItem("Translation + rotation", "translation_rotation")
+        last_model = str(self._settings.value("flow/motion_model", str(cfg_defaults.flow_motion_model)) or str(cfg_defaults.flow_motion_model))
+        idx = self.cfg_flow_motion_model.findData(last_model)
+        if idx >= 0:
+            self.cfg_flow_motion_model.setCurrentIndex(idx)
+        self.cfg_flow_motion_model.currentIndexChanged.connect(
+            lambda *_args: self._settings.setValue(
+                "flow/motion_model", str(self.cfg_flow_motion_model.currentData() or "affine_translation")
+            )
+        )
+        self.autopilot_cfg_form_left.addRow("Flow motion model", self.cfg_flow_motion_model)
+
         self.cfg_max_cmd = QDoubleSpinBox()
         self.cfg_max_cmd.setRange(0.0, 1.0)
         self.cfg_max_cmd.setSingleStep(0.01)
@@ -623,6 +637,36 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_est_deadband.setRange(0.0, 100.0)
         self.cfg_est_deadband.setValue(float(cfg_defaults.estimator_deadband_px_s))
         self.autopilot_cfg_form_right.addRow("Estimator deadband (px/s)", self.cfg_est_deadband)
+
+        self.cfg_flow_tr_residual_thresh_px = QDoubleSpinBox()
+        self.cfg_flow_tr_residual_thresh_px.setRange(0.0, 50.0)
+        self.cfg_flow_tr_residual_thresh_px.setSingleStep(0.25)
+        self.cfg_flow_tr_residual_thresh_px.setDecimals(2)
+        self.cfg_flow_tr_residual_thresh_px.setValue(
+            float(
+                self._settings.value(
+                    "flow/tr_residual_thresh_px",
+                    float(cfg_defaults.flow_tr_residual_thresh_px),
+                )
+                or float(cfg_defaults.flow_tr_residual_thresh_px)
+            )
+        )
+        self.cfg_flow_tr_residual_thresh_px.valueChanged.connect(
+            lambda *_args: self._settings.setValue(
+                "flow/tr_residual_thresh_px", float(self.cfg_flow_tr_residual_thresh_px.value())
+            )
+        )
+        self.autopilot_cfg_form_right.addRow("TR residual thresh (px)", self.cfg_flow_tr_residual_thresh_px)
+
+        self.cfg_flow_tr_min_points = QSpinBox()
+        self.cfg_flow_tr_min_points.setRange(4, 500)
+        self.cfg_flow_tr_min_points.setValue(
+            int(self._settings.value("flow/tr_min_points", int(cfg_defaults.flow_tr_min_points)) or int(cfg_defaults.flow_tr_min_points))
+        )
+        self.cfg_flow_tr_min_points.valueChanged.connect(
+            lambda *_args: self._settings.setValue("flow/tr_min_points", int(self.cfg_flow_tr_min_points.value()))
+        )
+        self.autopilot_cfg_form_right.addRow("TR min points", self.cfg_flow_tr_min_points)
 
         self.cfg_roll_sign = QDoubleSpinBox()
         self.cfg_roll_sign.setRange(-1.0, 1.0)
@@ -1245,6 +1289,9 @@ class E88QtControllerWindow(QMainWindow):
             kalman_sigma_v=float(self.cfg_sigma_v.value()),
             min_quality=float(self.cfg_min_quality.value()),
             max_cmd=float(self.cfg_max_cmd.value()),
+            flow_motion_model=str(self.cfg_flow_motion_model.currentData() or "affine_translation"),
+            flow_tr_residual_thresh_px=float(self.cfg_flow_tr_residual_thresh_px.value()),
+            flow_tr_min_points=int(self.cfg_flow_tr_min_points.value()),
             kp_vx=float(self.cfg_kp_vx.value()),
             kp_vy=float(self.cfg_kp_vy.value()),
             ki_vx=float(self.cfg_ki_vx.value()),

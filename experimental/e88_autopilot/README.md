@@ -369,6 +369,116 @@ These phases run *before* the main hold loop if `enable_takeoff=True`.
   - Minimum quality required to produce a control command.
   - If quality drops below this, controller output is disabled (and integrator reset).
 
+### 6.4.1 Optical flow motion model (optional rotation compensation)
+
+The optical flow layer estimates a per-frame translation `(dx_px, dy_px)` from many tracked feature point motions.
+
+By default it uses an affine model and takes only the translation terms. This works well for pure translation but can be biased by small camera rotations (e.g., roll/pitch “inclination” while hovering) which may be misinterpreted as opposite-sign translation.
+
+The stabilizer supports an optional motion model that explicitly fits translation + in-plane rotation:
+
+- `flow_motion_model: str = "affine_translation"`
+  - Options:
+    - `"affine_translation"`: legacy behavior (use affine fit translation terms).
+    - `"translation_rotation"`: estimate translation and rotation and use only the translation components.
+
+- `flow_tr_residual_thresh_px: float = 3.0`
+  - Used only when `flow_motion_model="translation_rotation"`.
+  - Per-track residual threshold (in px) for a second-pass refit. Set to `0.0` to disable residual filtering.
+
+- `flow_tr_min_points: int = 20`
+  - Used only when `flow_motion_model="translation_rotation"`.
+  - Minimum number of tracked points required to run the translation+rotation model.
+
+**Practical tuning guidance**
+
+These are robustness knobs (not calibration constants). Tune them based on how stable the tracking is in your environment:
+
+- If you see noisy `omega` or frequent sign flips:
+  - increase `flow_tr_min_points` (e.g., `20 -> 40` or `60`) to require a stronger support set.
+
+- If `translation_rotation` almost never activates (it frequently fails to fit):
+  - decrease `flow_tr_min_points` (but expect more noise), and/or
+  - increase `flow_tr_residual_thresh_px` slightly.
+
+- If `translation_rotation` activates but seems to overreact (bad correction, high `model_rmse_px`):
+  - decrease `flow_tr_residual_thresh_px` (e.g., `3.0 -> 2.0` or `1.5`) to reject inconsistent tracks.
+
+What to watch while tuning:
+
+- `motion_model` (how often it chooses `translation_rotation`)
+- `model_rmse_px` (should be low and stable when the model fits)
+- `n_tracked` / `inlier_ratio` / `quality` (should not be collapsing)
+
+Additional flow telemetry fields (in `samples.jsonl` under `flow`) help A/B testing:
+
+- `motion_model`
+  - Which estimator path was used for this frame.
+
+- `raw_dx_px`, `raw_dy_px`
+  - The translation returned by the legacy affine/median path before any translation+rotation correction.
+
+- `omega_rad`, `omega_rad_s`
+  - Estimated in-plane rotation per frame and per second.
+  - These are expressed in raw OpenCV image coordinates (x right, y down), so interpret sign accordingly.
+
+- `model_rmse_px`
+  - RMSE of the translation+rotation model fit (lower is better).
+
+**How `model_rmse_px` is computed**
+
+When `flow_motion_model="translation_rotation"` is enabled, we fit a small-motion model to all tracked point displacements:
+
+- unknowns: translation `(tx, ty)` and in-plane rotation `omega` (radians per frame)
+- for each tracked point we predict its displacement `(dx, dy)` from `(tx, ty, omega)`
+
+For each point, we compute the residual magnitude:
+
+- `r_i = sqrt((dx_i - dx_pred_i)^2 + (dy_i - dy_pred_i)^2)`
+
+Then:
+
+- `model_rmse_px = sqrt(mean(r_i^2))`
+
+This is computed over the points used in the (final) fit.
+
+**How to interpret high `model_rmse_px` (what’s “wrong”)**
+
+High RMSE means the observed flow does not look like “translation + a single global in-plane rotation”. Common causes:
+
+- Non-planar scene / parallax (close objects, strong depth variation)
+- Moving objects in the scene
+- LK tracking failures / bad matches
+- Corrupted frames (torn frames, compression artifacts)
+- Strong lens distortion (the simple model is less accurate near the edges)
+
+Practical debugging signals in `samples.jsonl`:
+
+- If `model_rmse_px` spikes while `n_tracked` drops, it often indicates tracking collapse.
+- If `model_rmse_px` spikes while `n_tracked` stays high and the frame looks “busy”, it often indicates parallax/moving objects.
+
+**Why RMSE is not a perfect “source of truth”**
+
+RMSE is a self-consistency score for a particular model. It does not guarantee the estimated translation is correct.
+
+Two important limitations:
+
+- A wrong model can still fit well: if the true motion is not translation+rotation (e.g., perspective effects), the solver can sometimes explain it with a plausible `(tx, ty, omega)` and still produce a low RMSE.
+- RMSE is scene-dependent: low-texture scenes can yield low RMSE on a small set of points even when the estimate is biased.
+
+So RMSE is best treated as a *diagnostic* and an *additional gate*, not a ground-truth label.
+
+**How to use RMSE as an additional gate (recommended)**
+
+If you find cases where `translation_rotation` produces worse commands, you can tighten acceptance by gating on RMSE.
+
+For example, accept translation+rotation only if:
+
+- `model_rmse_px <= threshold_px`
+- and `n_used >= flow_tr_min_points`
+
+Otherwise fall back to the legacy affine translation estimate.
+
 **How `quality` is defined**
 
 `LucasKanadeDriftEstimator` defines:

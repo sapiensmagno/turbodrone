@@ -36,6 +36,10 @@ class StabilizerConfig:
     min_quality: float = 0.15
     max_cmd: float = 0.9
 
+    flow_motion_model: str = "affine_translation"
+    flow_tr_residual_thresh_px: float = 3.0
+    flow_tr_min_points: int = 20
+
     kp_vx: float = 0.003
     kp_vy: float = 0.003
     ki_vx: float = 0.0005
@@ -196,7 +200,11 @@ class AutoStabilizer:
         self._cfg = cfg or StabilizerConfig()
         self._telemetry_sink = telemetry_sink
 
-        self._flow = LucasKanadeDriftEstimator()
+        self._flow = LucasKanadeDriftEstimator(
+            motion_model=str(self._cfg.flow_motion_model),
+            tr_residual_thresh_px=float(self._cfg.flow_tr_residual_thresh_px),
+            tr_min_points=int(self._cfg.flow_tr_min_points),
+        )
         self._kf = None
         if self._cfg.use_kalman:
             self._kf = VelocityKalman2D(sigma_a=self._cfg.kalman_sigma_a, sigma_v_meas=self._cfg.kalman_sigma_v)
