@@ -373,11 +373,11 @@ These phases run *before* the main hold loop if `enable_takeoff=True`.
 
 The optical flow layer estimates a per-frame translation `(dx_px, dy_px)` from many tracked feature point motions.
 
-By default it uses an affine model and takes only the translation terms. This works well for pure translation but can be biased by small camera rotations (e.g., roll/pitch “inclination” while hovering) which may be misinterpreted as opposite-sign translation.
+Initially, it used an affine model and took only the translation terms. This would work well for pure translation but can be biased by small camera rotations (e.g., roll/pitch “inclination” while hovering) which may be misinterpreted as opposite-sign translation.
 
-The stabilizer supports an optional motion model that explicitly fits translation + in-plane rotation:
+The stabilizer now supports an optional motion model that explicitly fits translation + in-plane rotation:
 
-- `flow_motion_model: str = "affine_translation"`
+- `flow_motion_model: str = "translation_rotation"`
   - Options:
     - `"affine_translation"`: legacy behavior (use affine fit translation terms).
     - `"translation_rotation"`: estimate translation and rotation and use only the translation components.

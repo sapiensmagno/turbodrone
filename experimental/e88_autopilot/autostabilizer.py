@@ -36,7 +36,7 @@ class StabilizerConfig:
     min_quality: float = 0.15
     max_cmd: float = 0.9
 
-    flow_motion_model: str = "affine_translation"
+    flow_motion_model: str = "translation_rotation"
     flow_tr_residual_thresh_px: float = 3.0
     flow_tr_min_points: int = 20
 
