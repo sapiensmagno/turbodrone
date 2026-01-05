@@ -586,15 +586,9 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_flow_motion_model = QComboBox()
         self.cfg_flow_motion_model.addItem("Affine translation", "affine_translation")
         self.cfg_flow_motion_model.addItem("Translation + rotation", "translation_rotation")
-        last_model = str(self._settings.value("flow/motion_model", str(cfg_defaults.flow_motion_model)) or str(cfg_defaults.flow_motion_model))
-        idx = self.cfg_flow_motion_model.findData(last_model)
+        idx = self.cfg_flow_motion_model.findData(str(cfg_defaults.flow_motion_model))
         if idx >= 0:
             self.cfg_flow_motion_model.setCurrentIndex(idx)
-        self.cfg_flow_motion_model.currentIndexChanged.connect(
-            lambda *_args: self._settings.setValue(
-                "flow/motion_model", str(self.cfg_flow_motion_model.currentData() or "affine_translation")
-            )
-        )
         self.autopilot_cfg_form_left.addRow("Flow motion model", self.cfg_flow_motion_model)
 
         self.cfg_max_cmd = QDoubleSpinBox()
@@ -642,30 +636,12 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_flow_tr_residual_thresh_px.setRange(0.0, 50.0)
         self.cfg_flow_tr_residual_thresh_px.setSingleStep(0.25)
         self.cfg_flow_tr_residual_thresh_px.setDecimals(2)
-        self.cfg_flow_tr_residual_thresh_px.setValue(
-            float(
-                self._settings.value(
-                    "flow/tr_residual_thresh_px",
-                    float(cfg_defaults.flow_tr_residual_thresh_px),
-                )
-                or float(cfg_defaults.flow_tr_residual_thresh_px)
-            )
-        )
-        self.cfg_flow_tr_residual_thresh_px.valueChanged.connect(
-            lambda *_args: self._settings.setValue(
-                "flow/tr_residual_thresh_px", float(self.cfg_flow_tr_residual_thresh_px.value())
-            )
-        )
+        self.cfg_flow_tr_residual_thresh_px.setValue(float(cfg_defaults.flow_tr_residual_thresh_px))
         self.autopilot_cfg_form_right.addRow("TR residual thresh (px)", self.cfg_flow_tr_residual_thresh_px)
 
         self.cfg_flow_tr_min_points = QSpinBox()
         self.cfg_flow_tr_min_points.setRange(4, 500)
-        self.cfg_flow_tr_min_points.setValue(
-            int(self._settings.value("flow/tr_min_points", int(cfg_defaults.flow_tr_min_points)) or int(cfg_defaults.flow_tr_min_points))
-        )
-        self.cfg_flow_tr_min_points.valueChanged.connect(
-            lambda *_args: self._settings.setValue("flow/tr_min_points", int(self.cfg_flow_tr_min_points.value()))
-        )
+        self.cfg_flow_tr_min_points.setValue(int(cfg_defaults.flow_tr_min_points))
         self.autopilot_cfg_form_right.addRow("TR min points", self.cfg_flow_tr_min_points)
 
         self.cfg_roll_sign = QDoubleSpinBox()
