@@ -23,7 +23,7 @@ Phase 0 focuses on making the estimator and control loop inspectable:
 - A Qt UI shows diagnostics, an optical-flow overlay, and a trajectory widget.
 - Stationary **calibration** estimates `estimator_deadband_px_s` and `kalman_sigma_v` and persists them.
 
-**Phase 1 status (in progress): improving visual perspective **
+**Phase 1 status (in progress): improving visual perspective**
 
 ---
 
@@ -67,7 +67,7 @@ Phase 0 focuses on making the estimator and control loop inspectable:
 
 ### 1.1 Run from the Qt UI (recommended)
 
-From the repo root:
+From the repo experimental folder start the virtualenv and:
 
 ```bash
 python -m e88_qt.app
@@ -75,7 +75,7 @@ python -m e88_qt.app
 
 In the UI:
 
-- Chose camera. Camera 2 is facing down so it is preferred. Switch between them to reset the stream if you experience video issues. They may happen due to RTSP over UDP (packet loss/jitter)
+- Chose camera. Camera 2 is fixed and facing down so it is preferred. Switch between them to reset the stream if you experience video issues. They may happen due to RTSP over UDP (packet loss/jitter)
 - Configure parameters in the **Autostabilizer** section.
 - In **Visual Scale**:
   - Select a saved Reference (or Capture one).
@@ -114,7 +114,7 @@ Instead it stabilizes **visual drift**:
 Important practical implications:
 
 - This approach works best when the camera sees a **static environment** with enough texture (corners/edges).
-- It estimates motion in **image space (pixels)**; mapping to real-world meters is not part of this experimental module.
+- It estimates motion in **image space (pixels)**; mapping to real-world meters is in development/testing (Phase 1 of the roadmap).
 
 ---
 
