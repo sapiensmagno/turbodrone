@@ -10,6 +10,8 @@ The goal is simple:
 - Convert the estimated drift into small **roll/pitch compensation commands**.
 - Provide real-time **telemetry** for a Qt UI (optical-flow overlay + 2D motion/compensation plot).
 
+**Progress (see docs/roadmap)**
+
 **Phase 0 status (implemented): observability-first**
 
 Phase 0 focuses on making the estimator and control loop inspectable:
@@ -20,6 +22,8 @@ Phase 0 focuses on making the estimator and control loop inspectable:
 - **Frame staleness** and **dropped/overwritten frames** are surfaced in telemetry.
 - A Qt UI shows diagnostics, an optical-flow overlay, and a trajectory widget.
 - Stationary **calibration** estimates `estimator_deadband_px_s` and `kalman_sigma_v` and persists them.
+
+**Phase 1 status (in progress): improving visual perspective **
 
 ---
 
