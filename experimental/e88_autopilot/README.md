@@ -121,16 +121,29 @@ At a high level, every control step does:
 1. **Acquire a new video frame** from the drone.
    - Frame acquisition runs in a background thread and the control loop consumes the latest frame without blocking.
 2. **Track feature points** across consecutive frames (Lucas–Kanade optical flow).
-3. Estimate a single “best” global translation `(dx, dy)` between frames using **RANSAC**.
-4. Convert `(dx, dy, dt)` into velocity `(vx, vy)` in pixels/second.
-5. Optionally run a **Kalman filter** to smooth velocities and derive a more stable position estimate.
-6. Feed `(vx, vy)` into a **controller** to compute `(roll_cmd, pitch_cmd)`.
-7. Send `(roll_cmd, pitch_cmd, throttle)` to the drone.
-8. Emit **telemetry** so the UI can display:
+3. **Fit a global motion model** to the tracked point displacements.
+   - Default is `flow_motion_model="translation_rotation"`, which estimates translation + in-plane rotation.
+   - A simpler `"affine_translation"` option is available.
+   - The fit is done robustly (RANSAC / residual gating) to reduce the impact of outlier tracks.
+4. Convert the fitted motion into drift velocity `(vx, vy)` in pixels/second.
+5. Optionally estimate **visual scale** (meters-per-pixel) and convert `(vx, vy)` to m/s.
+   - When enabled and stable, we compute `vx_m_s`, `vy_m_s` from `(vx, vy)`.
+   - When stability is lost, the system can optionally keep using the last stable scale for a short hold window.
+6. Apply measurement conditioning (deadband/gating), then optionally run a **Kalman filter**.
+   - When enabled (`use_kalman=True`), the controller uses Kalman-smoothed `vx/vy` and the Kalman `x/y` state provides the primary position estimate.
+7. Choose the active controller:
+   - Default: velocity hold (drive measured velocity toward `0`).
+   - Optional: position leash (outer-loop position hold that produces a velocity setpoint to pull back toward the start point).
+8. If m/s control is enabled and scale is stable (or held), feed controllers with m/s; otherwise use px/s.
+9. Feed the selected controller and compute `(roll_cmd, pitch_cmd)`.
+9. Send `(roll_cmd, pitch_cmd, throttle)` to the drone.
+10. Emit **telemetry** (and optionally record `samples.jsonl`) so the UI can display and you can evaluate:
    - the camera frame,
    - flow tracks,
-   - estimated velocity/position,
-   - command outputs.
+   - fitted flow model quality and rotation estimate,
+   - estimated velocity/position (px and optionally m/s; raw and/or Kalman),
+   - command outputs,
+   - leash state (when enabled).
 
 ---
 
