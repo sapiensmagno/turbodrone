@@ -65,7 +65,12 @@ from e88_autopilot.calibration import load_calibration, run_stationary_calibrati
 from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig, StabilizerTelemetry
 from e88_autopilot.reference_store import ReferenceStore
 from e88_autopilot.visual_scale import VisualScaleEstimator
-from e88_autopilot.session_recorder import SessionRecorder, build_default_meta, measure_icmp_ping_rtt_ms
+from e88_autopilot.session_recorder import (
+    SessionRecorder,
+    build_default_meta,
+    measure_icmp_ping_rtt_ms,
+    telemetry_to_flat_sample,
+)
 from e88.config import E88Config
 from turbodrone import Drone
 
@@ -193,57 +198,7 @@ class _AutostabilizerWorker(QThread):
 
     @staticmethod
     def _telemetry_to_sample(t: StabilizerTelemetry) -> dict:
-        return {
-            "phase": str(t.phase),
-            "timestamp": float(t.timestamp),
-            "pos_x_px": float(t.pos_x_px),
-            "pos_y_px": float(t.pos_y_px),
-            "flow": t.flow,
-            "kalman": t.kalman,
-            "cond_vx_px_s": float(t.kf_input_vx_px_s),
-            "cond_vy_px_s": float(t.kf_input_vy_px_s),
-            "cond_gated": bool(t.kf_gated),
-            "used_vx_px_s": float(t.used_vx_px_s),
-            "used_vy_px_s": float(t.used_vy_px_s),
-            "cmd_roll": float(t.cmd_roll),
-            "cmd_pitch": float(t.cmd_pitch),
-            "cmd_throttle": float(t.cmd_throttle),
-            "t_loop_start": float(t.t_loop_start),
-            "t_frame_received": float(t.t_frame_received),
-            "t_flow_start": float(t.t_flow_start),
-            "t_flow_end": float(t.t_flow_end),
-            "t_kf_end": float(t.t_kf_end),
-            "t_ctrl_end": float(t.t_ctrl_end),
-            "t_cmd_sent": float(t.t_cmd_sent),
-            "dt_flow_ms": float(t.dt_flow_ms),
-            "dt_total_ms": float(t.dt_total_ms),
-            "frame_age_ms": float(t.frame_age_ms),
-            "frame_stale_ms": float(t.frame_stale_ms),
-            "frame_seq": int(t.frame_seq),
-            "frame_is_new": bool(t.frame_is_new),
-            "frames_dropped": int(t.frames_dropped),
-            "estimated_latency_ms": float(t.estimated_latency_ms),
-            "loop_rate_hz": float(t.loop_rate_hz),
-            "frame_rate_hz": float(t.frame_rate_hz),
-            "visual_scale_enabled": bool(getattr(t, "visual_scale_enabled", False)),
-            "visual_scale_error": str(getattr(t, "visual_scale_error", "")),
-            "altitude_est_m": None if t.altitude_est_m is None else float(t.altitude_est_m),
-            "altitude_source": str(t.altitude_source),
-            "ref_detected": bool(t.ref_detected),
-            "ref_width_px": float(t.ref_width_px),
-            "ref_height_px": float(t.ref_height_px),
-            "ref_size_px": float(t.ref_size_px),
-            "vx_m_s": None if t.vx_m_s is None else float(t.vx_m_s),
-            "vy_m_s": None if t.vy_m_s is None else float(t.vy_m_s),
-            "used_vx_m_s": None if t.used_vx_m_s is None else float(t.used_vx_m_s),
-            "used_vy_m_s": None if t.used_vy_m_s is None else float(t.used_vy_m_s),
-            "scale_stable": bool(t.scale_stable),
-            "ref_mode": str(t.ref_mode),
-            "ref_n_matches": int(t.ref_n_matches),
-            "ref_n_inliers": int(t.ref_n_inliers),
-            "ref_inlier_ratio": float(t.ref_inlier_ratio),
-            "ref_reproj_error_px": float(t.ref_reproj_error_px),
-        }
+        return telemetry_to_flat_sample(t)
 
     def pop_latest(self) -> Optional[StabilizerTelemetry]:
         with self._latest_lock:
