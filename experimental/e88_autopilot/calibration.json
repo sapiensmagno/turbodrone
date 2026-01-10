@@ -5,7 +5,7 @@
     "estimator_deadband_px_s": 2.0654733541504893,
     "kalman_sigma_v": 0.381620866093674,
     "min_quality": 0.15,
-    "n_samples": 92,
+    "n_samples": 183,
     "percentile": 99.0
   },
   "version": 1
