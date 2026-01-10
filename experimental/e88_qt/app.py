@@ -540,6 +540,7 @@ class E88QtControllerWindow(QMainWindow):
 
         self.cfg_flow_motion_model = QComboBox()
         self.cfg_flow_motion_model.addItem("Affine translation", "affine_translation")
+        self.cfg_flow_motion_model.addItem("Affine full", "affine_full")
         self.cfg_flow_motion_model.addItem("Translation + rotation", "translation_rotation")
         idx = self.cfg_flow_motion_model.findData(str(cfg_defaults.flow_motion_model))
         if idx >= 0:

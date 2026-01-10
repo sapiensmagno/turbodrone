@@ -206,6 +206,46 @@ class LucasKanadeDriftEstimator:
 
         self._last_tracks: Optional[FlowTracks] = None
 
+    @staticmethod
+    def _rmse_affine_px(
+        *,
+        prev_xy: np.ndarray,
+        next_xy: np.ndarray,
+        m: Optional[np.ndarray],
+        inliers: Optional[np.ndarray],
+    ) -> float:
+        if m is None:
+            return 0.0
+        if prev_xy is None or next_xy is None:
+            return 0.0
+        prev = prev_xy.reshape(-1, 2).astype(np.float64)
+        nxt = next_xy.reshape(-1, 2).astype(np.float64)
+        if prev.shape[0] != nxt.shape[0] or prev.shape[0] == 0:
+            return 0.0
+
+        if inliers is None:
+            mask = np.ones((prev.shape[0],), dtype=np.bool_)
+        else:
+            mask = inliers.reshape(-1).astype(np.bool_)
+            if mask.shape[0] != prev.shape[0]:
+                mask = np.ones((prev.shape[0],), dtype=np.bool_)
+
+        prev_u = prev[mask]
+        nxt_u = nxt[mask]
+        if prev_u.shape[0] == 0:
+            return 0.0
+
+        mm = np.asarray(m, dtype=np.float64)
+        if mm.shape != (2, 3):
+            return 0.0
+
+        ones = np.ones((prev_u.shape[0], 1), dtype=np.float64)
+        prev_h = np.concatenate([prev_u, ones], axis=1)
+        pred = prev_h @ mm.T
+        r = nxt_u - pred
+        e2 = np.sum(r * r, axis=1)
+        return float(np.sqrt(float(np.mean(e2))))
+
     def reset(self) -> None:
         self._prev_gray = None
         self._prev_pts = None
@@ -283,21 +323,38 @@ class LucasKanadeDriftEstimator:
 
         inlier_ratio = 1.0
 
+        affine_m: Optional[np.ndarray] = None
         if n_tracked >= 4:
-            m, inliers = cv2.estimateAffinePartial2D(prev_good, next_good, method=cv2.RANSAC, ransacReprojThreshold=3.0)
-            if m is not None:
-                dx_px = float(m[0, 2])
-                dy_px = float(m[1, 2])
+            if self._motion_model == "affine_full":
+                affine_m, inliers = cv2.estimateAffine2D(
+                    prev_good,
+                    next_good,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=3.0,
+                )
+            else:
+                affine_m, inliers = cv2.estimateAffinePartial2D(
+                    prev_good,
+                    next_good,
+                    method=cv2.RANSAC,
+                    ransacReprojThreshold=3.0,
+                )
+
+            if affine_m is not None:
+                dx_px = float(affine_m[0, 2])
+                dy_px = float(affine_m[1, 2])
             else:
                 flow = (next_good - prev_good).reshape(-1, 2)
                 dx_px = float(np.median(flow[:, 0]))
                 dy_px = float(np.median(flow[:, 1]))
                 inliers = np.ones((n_tracked,), dtype=np.bool_)
+                affine_m = np.array([[1.0, 0.0, dx_px], [0.0, 1.0, dy_px]], dtype=np.float64)
         elif n_tracked > 0:
             flow = (next_good - prev_good).reshape(-1, 2)
             dx_px = float(np.median(flow[:, 0]))
             dy_px = float(np.median(flow[:, 1]))
             inliers = np.ones((n_tracked,), dtype=np.bool_)
+            affine_m = np.array([[1.0, 0.0, dx_px], [0.0, 1.0, dy_px]], dtype=np.float64)
 
         if inliers is None:
             inliers = np.ones((n_tracked,), dtype=np.bool_)
@@ -343,8 +400,8 @@ class LucasKanadeDriftEstimator:
         raw_dy_px = float(dy_px) * scale
         omega_rad = 0.0
         omega_rad_s = 0.0
-        model_rmse_px = 0.0
-        motion_model = str("affine_translation")
+        model_rmse_px = float(self._rmse_affine_px(prev_xy=prev_good, next_xy=next_good, m=affine_m, inliers=inliers)) * scale
+        motion_model = str("affine_full" if self._motion_model == "affine_full" else "affine_translation")
 
         if self._motion_model == "translation_rotation" and n_tracked >= 4:
             fit = self._tr_model.estimate(
