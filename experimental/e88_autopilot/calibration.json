@@ -1,11 +1,11 @@
 {
   "result": {
-    "created_at_ts": 1767655697.7258768,
+    "created_at_ts": 1770593084.8050048,
     "duration_sec": 10.0,
-    "estimator_deadband_px_s": 2.0654733541504893,
-    "kalman_sigma_v": 0.381620866093674,
+    "estimator_deadband_px_s": 2.4595407655697694,
+    "kalman_sigma_v": 1.1087436187464106,
     "min_quality": 0.15,
-    "n_samples": 183,
+    "n_samples": 165,
     "percentile": 99.0
   },
   "version": 1
