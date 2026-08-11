@@ -15,6 +15,46 @@ from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig
 from e88_autopilot.optical_flow import FlowEstimate
 
 
+class _PassthroughFlow:
+    """Flow estimator stub that returns a fixed estimate once it has seen two
+    frames, deriving dt from whatever timestamp it is handed."""
+
+    def __init__(self, *, vx_px_s: float = 10.0, vy_px_s: float = 0.0) -> None:
+        self._last_t = None
+        self.calls = 0
+        self._vx = float(vx_px_s)
+        self._vy = float(vy_px_s)
+
+    def reset(self):
+        self._last_t = None
+
+    def last_tracks(self):
+        return None
+
+    def update(self, _frame_bgr, timestamp=None):
+        self.calls += 1
+        t = float(0.0 if timestamp is None else timestamp)
+        if self._last_t is None:
+            self._last_t = t
+            return None
+        dt = t - float(self._last_t)
+        self._last_t = t
+        if dt <= 1e-6:
+            return None
+        return FlowEstimate(
+            dt_sec=float(dt),
+            dx_px=float(self._vx) * dt,
+            dy_px=float(self._vy) * dt,
+            vx_px_s=float(self._vx),
+            vy_px_s=float(self._vy),
+            quality=1.0,
+            n_features=100,
+            n_tracked=100,
+            inlier_ratio=1.0,
+            fallback_used=False,
+        )
+
+
 class _FakeDrone:
     def __init__(self) -> None:
         self._q: "Queue[tuple[np.ndarray, float]]" = Queue()
@@ -69,41 +109,20 @@ class TestAutoStabilizerRuntime(unittest.TestCase):
 
         self.assertGreaterEqual(len(drone.sent), 1)
 
-    def test_hold_flow_uses_monotonic_time_not_frame_timestamp(self) -> None:
-        class _StrictDtFlow:
-            def __init__(self) -> None:
-                self._last_t = None
-                self.calls = 0
+    def test_hold_flow_receives_monotonic_time_not_frame_timestamp(self) -> None:
+        """The hold loop must derive flow dt from a monotonic clock, not from the
+        frame's source timestamp (regression guard for commit 2e49441).
 
-            def reset(self):
-                self._last_t = None
-                self.calls = 0
+        This used to be tested indirectly, by pushing duplicate frames and relying
+        on the loop reprocessing them. Stale frames are now skipped outright
+        (skip_stale_frames), so the timestamp contract is asserted directly."""
 
-            def last_tracks(self):
-                return None
+        seen_timestamps = []
 
+        class _RecordingFlow(_PassthroughFlow):
             def update(self, _frame_bgr, timestamp=None):
-                self.calls += 1
-                t = float(0.0 if timestamp is None else timestamp)
-                if self._last_t is None:
-                    self._last_t = t
-                    return None
-                dt = t - float(self._last_t)
-                self._last_t = t
-                if dt <= 1e-6:
-                    return None
-                return FlowEstimate(
-                    dt_sec=float(dt),
-                    dx_px=10.0,
-                    dy_px=0.0,
-                    vx_px_s=10.0 / float(dt),
-                    vy_px_s=0.0,
-                    quality=1.0,
-                    n_features=100,
-                    n_tracked=100,
-                    inlier_ratio=1.0,
-                    fallback_used=False,
-                )
+                seen_timestamps.append(None if timestamp is None else float(timestamp))
+                return super().update(_frame_bgr, timestamp=timestamp)
 
         drone = _FakeDrone()
         cfg = StabilizerConfig(
@@ -114,30 +133,176 @@ class TestAutoStabilizerRuntime(unittest.TestCase):
             min_quality=0.0,
         )
 
-        latest = []
-
-        def sink(t):
-            latest.append(t)
-
-        s = AutoStabilizer(drone, cfg=cfg, telemetry_sink=sink)
-        strict_flow = _StrictDtFlow()
-        s._flow = strict_flow  # type: ignore[attr-defined]
+        s = AutoStabilizer(drone, cfg=cfg)
+        s._flow = _RecordingFlow()  # type: ignore[attr-defined]
 
         frame = np.zeros((120, 160, 3), dtype=np.uint8)
-        t0 = 1000.0
-        # Same frame timestamp repeated. If the stabilizer passes the frame ts to the
-        # flow estimator, it will produce dt==0 and stay None. Using monotonic time
-        # allows dt>0 even when the drone timestamp repeats.
-        drone.push(frame.copy(), t0)
-        drone.push(frame.copy(), t0)
-        drone.push(frame.copy(), t0)
-        drone.push(frame.copy(), t0)
+        # Source timestamps far from any plausible monotonic clock value.
+        drone.push(frame.copy(), 1000.0)
+        drone.push(frame.copy(), 1000.1)
 
         s.activate()
         s.run(duration_sec=0.25)
 
-        got_flow = any(getattr(t, "flow", None) is not None for t in latest)
-        self.assertTrue(got_flow)
+        self.assertTrue(seen_timestamps)
+        for t in seen_timestamps:
+            self.assertIsNotNone(t)
+            self.assertNotIn(t, (1000.0, 1000.1))
+
+    @staticmethod
+    def _paced_pusher(drone, *, n: int, interval_sec: float):
+        """Feed frames at a fixed cadence, slower than the control loop, so the
+        loop genuinely outruns the camera. The size-1 LatestFrameBuffer drops
+        frames pushed faster than they are read, so pacing is required to get
+        more than one distinct frame into the loop."""
+        frame = np.zeros((120, 160, 3), dtype=np.uint8)
+
+        def run():
+            for i in range(n):
+                drone.push(frame.copy(), 1000.0 + 0.1 * i)
+                time.sleep(interval_sec)
+
+        return threading.Thread(target=run, daemon=True)
+
+    def test_stale_frames_are_not_reprocessed(self) -> None:
+        """When the control loop outruns the camera, get_latest() returns the frame
+        it already returned. Re-running optical flow on an identical image yields
+        dx ~ 0 with dt > 0 -- a fabricated zero-velocity measurement. The loop must
+        skip those iterations instead."""
+
+        drone = _FakeDrone()
+        cfg = StabilizerConfig(
+            enable_takeoff=False,
+            cmd_rate_hz=200.0,  # far faster than frames arrive
+            use_kalman=False,
+            enable_visual_scale=False,
+            min_quality=0.0,
+            settle_good_frames=0,
+            climb_duration_sec=0.0,
+        )
+
+        latest = []
+        s = AutoStabilizer(drone, cfg=cfg, telemetry_sink=latest.append)
+        flow = _PassthroughFlow()
+        s._flow = flow  # type: ignore[attr-defined]
+
+        n_frames = 5
+        pusher = self._paced_pusher(drone, n=n_frames, interval_sec=0.05)
+        s.activate()
+        pusher.start()
+        s.run(duration_sec=0.4)
+        pusher.join(timeout=1.0)
+
+        hold = [t for t in latest if getattr(t, "phase", "") == "hold"]
+        fresh = [t for t in hold if getattr(t, "frame_is_new", False)]
+        stale = [t for t in hold if not getattr(t, "frame_is_new", True)]
+
+        # The loop spun many more times than frames arrived.
+        self.assertTrue(stale)
+        self.assertGreater(len(stale), len(fresh))
+        # Flow ran only on genuinely new frames, never on the repeats.
+        self.assertLessEqual(flow.calls, n_frames)
+        self.assertEqual(flow.calls, len(fresh))
+        self.assertTrue(all(getattr(t, "flow", None) is None for t in stale))
+
+    def test_stale_frame_iterations_hold_the_last_command(self) -> None:
+        """Skipping a stale frame must re-latch the previous command, not drop to
+        neutral -- otherwise the effective command rate is chopped by the ratio of
+        loop rate to frame rate."""
+
+        drone = _FakeDrone()
+        cfg = StabilizerConfig(
+            enable_takeoff=False,
+            cmd_rate_hz=200.0,
+            use_kalman=False,
+            enable_visual_scale=False,
+            min_quality=0.0,
+            settle_good_frames=0,
+            climb_duration_sec=0.0,
+            kp_vx=0.01,
+            kp_vy=0.01,
+            deadband_px_s=0.0,
+            estimator_deadband_px_s=0.0,
+        )
+
+        latest = []
+        s = AutoStabilizer(drone, cfg=cfg, telemetry_sink=latest.append)
+        s._flow = _PassthroughFlow(vx_px_s=50.0, vy_px_s=0.0)  # type: ignore[attr-defined]
+
+        pusher = self._paced_pusher(drone, n=4, interval_sec=0.05)
+        s.activate()
+        pusher.start()
+        s.run(duration_sec=0.4)
+        pusher.join(timeout=1.0)
+
+        hold = [t for t in latest if getattr(t, "phase", "") == "hold"]
+        # Find the last iteration that had a real flow estimate, then confirm the
+        # stale iterations after it repeat that command rather than zeroing it.
+        idx = max((i for i, t in enumerate(hold) if getattr(t, "flow", None) is not None), default=None)
+        self.assertIsNotNone(idx)
+        assert idx is not None
+        after = hold[idx + 1 :]
+        self.assertTrue(after, "expected stale iterations after the last real frame")
+        for t in after:
+            self.assertAlmostEqual(float(t.cmd_roll), float(hold[idx].cmd_roll), places=9)
+            self.assertAlmostEqual(float(t.cmd_pitch), float(hold[idx].cmd_pitch), places=9)
+
+    def test_frozen_video_feed_neutralizes_instead_of_holding_forever(self) -> None:
+        """Holding the last command is only safe across the gap between consecutive
+        frames. If the feed freezes, frame_seq stops advancing forever -- and because
+        the E88 control thread re-transmits the latched RC state at 33 Hz, holding a
+        nonzero correction would fly the aircraft away."""
+
+        drone = _FakeDrone()
+        cfg = StabilizerConfig(
+            enable_takeoff=False,
+            cmd_rate_hz=200.0,
+            use_kalman=False,
+            enable_visual_scale=False,
+            min_quality=0.0,
+            settle_good_frames=0,
+            climb_duration_sec=0.0,
+            max_stale_frame_hold_sec=0.1,
+            kp_vx=0.01,
+            kp_vy=0.01,
+            deadband_px_s=0.0,
+            estimator_deadband_px_s=0.0,
+        )
+
+        latest = []
+        s = AutoStabilizer(drone, cfg=cfg, telemetry_sink=latest.append)
+        # Both axes nonzero: the controller call swaps vx/vy for the 90-degree
+        # camera mount, so a single-axis velocity would leave one command at zero.
+        s._flow = _PassthroughFlow(vx_px_s=50.0, vy_px_s=30.0)  # type: ignore[attr-defined]
+
+        # Two frames, then the feed goes silent for the rest of the run.
+        pusher = self._paced_pusher(drone, n=2, interval_sec=0.05)
+        s.activate()
+        pusher.start()
+        s.run(duration_sec=0.6)
+        pusher.join(timeout=1.0)
+
+        hold = [t for t in latest if getattr(t, "phase", "") == "hold"]
+        idx = max((i for i, t in enumerate(hold) if getattr(t, "flow", None) is not None), default=None)
+        self.assertIsNotNone(idx)
+        assert idx is not None
+
+        # A nonzero correction was in flight when the feed died.
+        self.assertNotEqual(float(hold[idx].cmd_roll), 0.0)
+        self.assertNotEqual(float(hold[idx].cmd_pitch), 0.0)
+
+        # The tail of the run must have neutralized rather than latched it.
+        tail = hold[-5:]
+        self.assertTrue(tail)
+        for t in tail:
+            self.assertEqual(float(t.cmd_roll), 0.0)
+            self.assertEqual(float(t.cmd_pitch), 0.0)
+
+        # ...and the same must reach the drone, not just telemetry.
+        self.assertTrue(drone.sent)
+        for roll, pitch, _throttle, _yaw in drone.sent[-5:]:
+            self.assertEqual(float(roll), 0.0)
+            self.assertEqual(float(pitch), 0.0)
 
     def test_visual_scale_exceptions_are_reported_in_telemetry(self) -> None:
         class _FakeFlow:

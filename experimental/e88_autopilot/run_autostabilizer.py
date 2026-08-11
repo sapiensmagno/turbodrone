@@ -5,7 +5,29 @@ import threading
 import time
 
 from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig
+from e88_autopilot.intrinsics import resolve_camera_geometry
 from turbodrone import Drone
+
+
+def _wait_for_fresh_frame(drone, *, timeout_sec: float):
+    """Return a frame captured after this call, or None on timeout.
+
+    `get_frame()` hands back the last decoded frame immediately, and reopening the
+    stream for a camera switch does not clear it -- so a naive read can return the
+    previous camera's frame, at the previous camera's resolution."""
+    t0 = time.monotonic()
+    baseline = None
+    while (time.monotonic() - t0) < float(timeout_sec):
+        item = drone.get_frame_with_timestamp(timeout=0.5)
+        if item is None:
+            continue
+        frame, ts = item
+        if baseline is None:
+            baseline = float(ts)
+            continue
+        if float(ts) > baseline:
+            return frame
+    return None
 
 
 def main() -> int:
@@ -40,6 +62,19 @@ def main() -> int:
     parser.add_argument("--est-deadband", type=float, default=None)
     parser.add_argument("--roll-sign", type=float, default=None)
     parser.add_argument("--pitch-sign", type=float, default=None)
+    parser.add_argument("--flow-motion-model", type=str, default=None)
+    parser.add_argument(
+        "--focal-length-px",
+        type=float,
+        default=None,
+        help="Override the focal length. By default it is loaded from the saved "
+        "chessboard calibration for --camera-id at the stream's resolution.",
+    )
+    parser.add_argument(
+        "--camera-id",
+        default=None,
+        help="Calibration entry to load (default: cam<--camera>, else cam2).",
+    )
     args = parser.parse_args()
 
     drone = Drone(protocol=args.protocol)
@@ -47,6 +82,27 @@ def main() -> int:
 
     if args.camera is not None:
         drone.switch_camera(args.camera)
+
+    camera_id = args.camera_id or (f"cam{int(args.camera)}" if args.camera is not None else "cam2")
+
+    # Calibration entries are keyed by the resolution RTSP actually negotiated, so
+    # peek at one frame before building the config. After a camera switch the video
+    # stream still holds the pre-switch frame, which may have a different size -- so
+    # wait for one stamped after the switch rather than taking whatever is cached.
+    probe = _wait_for_fresh_frame(drone, timeout_sec=5.0)
+    if probe is None:
+        f_px = float(args.focal_length_px or 0.0)
+        principal = None
+        print("[intrinsics] no frame yet; using --focal-length-px only")
+    else:
+        ph, pw = probe.shape[:2]
+        f_px, principal, note = resolve_camera_geometry(
+            camera_id=camera_id,
+            image_w=int(pw),
+            image_h=int(ph),
+            focal_length_px_override=args.focal_length_px,
+        )
+        print(f"[intrinsics] {note}")
 
     d = StabilizerConfig()
     cfg = StabilizerConfig(
@@ -71,6 +127,9 @@ def main() -> int:
         estimator_deadband_px_s=float(d.estimator_deadband_px_s if args.est_deadband is None else args.est_deadband),
         roll_sign=float(d.roll_sign if args.roll_sign is None else args.roll_sign),
         pitch_sign=float(d.pitch_sign if args.pitch_sign is None else args.pitch_sign),
+        flow_motion_model=str(d.flow_motion_model if args.flow_motion_model is None else args.flow_motion_model),
+        flow_focal_length_px=float(f_px),
+        flow_principal_point_px=principal,
     )
 
     stabilizer = AutoStabilizer(drone, cfg=cfg)

@@ -4,7 +4,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 
 def _load_dotenv() -> None:
@@ -37,13 +37,15 @@ _load_dotenv()
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt, QSettings, QThread, QTimer
+from PyQt5.QtCore import Qt, QPoint, QRect, QSettings, QThread, QTimer
 from PyQt5.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -63,8 +65,10 @@ from PyQt5.QtWidgets import (
 
 from e88_autopilot.calibration import load_calibration, run_stationary_calibration, save_calibration
 from e88_autopilot.autostabilizer import AutoStabilizer, StabilizerConfig, StabilizerTelemetry
-from e88_autopilot.reference_store import ReferenceStore
-from e88_autopilot.visual_scale import VisualScaleEstimator
+from e88_autopilot.frame_recorder import FrameRecorder
+from e88_autopilot.intrinsics import CameraIntrinsics, load_intrinsics
+from e88_autopilot.reference_store import ReferenceStore, parse_pad_quad
+from e88_autopilot.visual_scale import VisualScaleEstimator, compute_focal_length_px
 from e88_autopilot.session_recorder import (
     SessionRecorder,
     build_default_meta,
@@ -87,6 +91,8 @@ class _AutostabilizerWorker(QThread):
         initial_flow_sign_state: int,
         initial_control_sign_state: int,
         initial_sign_notes: str,
+        record_frames: bool = True,
+        camera_fps_hint: float = 20.0,
     ) -> None:
         super().__init__()
         self._drone = drone
@@ -98,6 +104,9 @@ class _AutostabilizerWorker(QThread):
         self._recordings_dir = Path(recordings_dir)
         self._session_recorder: Optional[SessionRecorder] = None
         self._session_dir: Optional[Path] = None
+        self._record_frames = bool(record_frames)
+        self._camera_fps_hint = float(max(1.0, camera_fps_hint))
+        self._frame_recorder: Optional[FrameRecorder] = None
 
         self._net_rtt_ms: Optional[float] = None
 
@@ -168,7 +177,26 @@ class _AutostabilizerWorker(QThread):
         meta["sign_verification"] = self._build_sign_verification(updated_at=None)
         self._session_dir = self._session_recorder.start(meta=meta)
 
+        if bool(self._record_frames):
+            # Every decoded camera frame is recorded, so the container rate is the
+            # camera's, not the control loop's. Stamping cmd_rate_hz would give a
+            # video whose timeline runs at the wrong speed for any consumer that
+            # does not read the JSONL sidecar.
+            self._frame_recorder = FrameRecorder(
+                session_dir=self._session_dir,
+                fps=float(self._camera_fps_hint),
+            )
+            self._frame_recorder.start()
+
     def _close_session(self) -> None:
+        fr = self._frame_recorder
+        self._frame_recorder = None
+        if fr is not None:
+            stats = fr.stop()
+            r = self._session_recorder
+            if r is not None:
+                r.update_meta({"frames": stats})
+
         r = self._session_recorder
         self._session_recorder = None
         if r is not None:
@@ -178,12 +206,25 @@ class _AutostabilizerWorker(QThread):
         try:
             self._start_session()
 
-            self._stabilizer = AutoStabilizer(self._drone, cfg=self._cfg, telemetry_sink=self._on_telemetry)
+            self._stabilizer = AutoStabilizer(
+                self._drone,
+                cfg=self._cfg,
+                telemetry_sink=self._on_telemetry,
+                frame_sink=self._frame_recorder,
+            )
             self._stabilizer.activate()
             self._stabilizer.run(duration_sec=self._duration_sec)
         except BaseException as e:
             self._error = e
         finally:
+            # Neutralize before anything that can block. AutoStabilizer.run() leaves
+            # the last correction latched, and the E88 control thread keeps
+            # retransmitting it at 33 Hz -- so draining the frame recorder first
+            # would fly the aircraft for the duration of that drain.
+            try:
+                self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=float(self._cfg.base_throttle))
+            except Exception:
+                pass
             self._close_session()
 
     def _on_telemetry(self, t: StabilizerTelemetry) -> None:
@@ -254,6 +295,182 @@ class _CalibrationWorker(QThread):
     @property
     def error(self) -> Optional[BaseException]:
         return self._error
+
+
+class _PadCornerCanvas(QLabel):
+    """Displays the reference image scaled to fit and lets the user click the pad's
+    four corners.
+
+    Four clicked corners rather than a dragged box: the pad is rarely photographed
+    axis-aligned, and an axis-aligned bounding box of a rotated pad overstates its
+    extent by up to sqrt(2) -- which would go straight into m_per_px and the derived
+    focal length. Ordered corners are also what a future PnP pose measurement needs.
+
+    The ordering contract is about the *pad*, not the image: the first edge (corner
+    1 -> 2) is the pad's physical width, the edge 1 -> 4 its physical height. That
+    matters for non-square pads, because downstream `_quad_sizes` divides
+    pad_width_m by the length of the first edge -- if the pad is rotated 90 degrees
+    in the photo, an image-relative "top-left to top-right" would silently swap the
+    metric axes."""
+
+    LABELS = (
+        "a corner of the pad",
+        "the next corner along the pad's WIDTH edge",
+        "the opposite corner (diagonal from the first)",
+        "the remaining corner",
+    )
+
+    def __init__(self, image_bgr: np.ndarray, *, max_side: int = 720) -> None:
+        super().__init__()
+        self._img_h, self._img_w = image_bgr.shape[:2]
+
+        scale = min(1.0, float(max_side) / float(max(self._img_w, self._img_h)))
+        self._scale = float(scale)
+        disp_w = max(1, int(round(self._img_w * scale)))
+        disp_h = max(1, int(round(self._img_h * scale)))
+
+        rgb = np.ascontiguousarray(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+        qimg = QImage(rgb.data, self._img_w, self._img_h, 3 * self._img_w, QImage.Format_RGB888).copy()
+        self._pix = QPixmap.fromImage(qimg).scaled(disp_w, disp_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        self.setPixmap(self._pix)
+        self.setFixedSize(self._pix.width(), self._pix.height())
+        self.setCursor(Qt.CrossCursor)
+
+        self._points: list = []
+
+    @property
+    def n_points(self) -> int:
+        return len(self._points)
+
+    def next_label(self) -> str:
+        if len(self._points) >= 4:
+            return "all four corners marked"
+        return f"click the {self.LABELS[len(self._points)]} corner"
+
+    def undo(self) -> None:
+        if self._points:
+            self._points.pop()
+            self.update()
+
+    def clear(self) -> None:
+        self._points = []
+        self.update()
+
+    def pad_corners_px(self) -> Optional[np.ndarray]:
+        """The four corners in *original* reference-image pixels, in the order
+        top-left, top-right, bottom-right, bottom-left."""
+        if len(self._points) != 4:
+            return None
+        s = self._scale if self._scale > 1e-9 else 1.0
+        pts = np.array([[p.x() / s, p.y() / s] for p in self._points], dtype=np.float32)
+        pts[:, 0] = np.clip(pts[:, 0], 0.0, float(self._img_w - 1))
+        pts[:, 1] = np.clip(pts[:, 1], 0.0, float(self._img_h - 1))
+
+        # Validate with the store's own rule rather than a looser local one. A quad
+        # that passes here but fails there would be reported as saved while the
+        # record silently ends up with no pad quad -- and, when editing, would clear
+        # a previously valid quad and its altitude calibration.
+        if parse_pad_quad(pts.tolist()) is None:
+            return None
+        return pts
+
+    def mousePressEvent(self, ev) -> None:
+        if len(self._points) >= 4:
+            return
+        self._points.append(ev.pos())
+        self.update()
+
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)
+        if not self._points:
+            return
+        p = QPainter(self)
+        p.setPen(QPen(QColor(0, 255, 0), 2))
+        for i, pt in enumerate(self._points):
+            p.drawEllipse(pt, 4, 4)
+            p.drawText(pt + QPoint(7, -7), str(i + 1))
+        if len(self._points) > 1:
+            for i in range(len(self._points) - 1):
+                p.drawLine(self._points[i], self._points[i + 1])
+        if len(self._points) == 4:
+            p.drawLine(self._points[3], self._points[0])
+        p.end()
+
+
+class PadRectDialog(QDialog):
+    """Asks the user to mark where the physical pad sits inside the reference image.
+
+    The reference image is stored uncropped so ORB has surrounding texture to match
+    against, but pad_width_m/pad_height_m describe only the pad itself. Without this
+    the detector measures the projected footprint of the whole reference image, so
+    m_per_px -- and the focal length derived from it -- are scaled by the photo/pad
+    extent ratio."""
+
+    def __init__(self, image_bgr: np.ndarray, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Mark the pad within the reference image")
+
+        self._canvas = _PadCornerCanvas(image_bgr)
+
+        info = QLabel(
+            "Click the four corners of the pad (the object whose real-world dimensions "
+            "you entered), walking around its edge.\n\n"
+            "Start at any corner and go along the pad's WIDTH edge first -- the edge "
+            "whose real length you entered as the pad width. Everything outside the "
+            "pad is context for matching and must not be counted in the measured size."
+        )
+        info.setWordWrap(True)
+
+        self._prompt = QLabel(self._canvas.next_label())
+
+        undo_btn = QPushButton("Undo")
+        undo_btn.clicked.connect(self._on_undo)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._on_clear)
+
+        self._buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        self._buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+
+        # Points are added on press; refresh the prompt/OK state after each one.
+        self._canvas.mousePressEvent = self._wrap_press(self._canvas.mousePressEvent)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(undo_btn)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch(1)
+
+        layout = QVBoxLayout()
+        layout.addWidget(info)
+        layout.addWidget(self._canvas, alignment=Qt.AlignCenter)
+        layout.addWidget(self._prompt)
+        layout.addLayout(btn_row)
+        layout.addWidget(self._buttons)
+        self.setLayout(layout)
+
+    def _wrap_press(self, original):
+        def handler(ev):
+            original(ev)
+            self._refresh()
+
+        return handler
+
+    def _on_undo(self) -> None:
+        self._canvas.undo()
+        self._refresh()
+
+    def _on_clear(self) -> None:
+        self._canvas.clear()
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._prompt.setText(self._canvas.next_label())
+        self._buttons.button(QDialogButtonBox.Ok).setEnabled(self._canvas.pad_corners_px() is not None)
+
+    def pad_corners_px(self) -> Optional[np.ndarray]:
+        return self._canvas.pad_corners_px()
 
 
 class _TrajectoryWidget(QWidget):
@@ -414,6 +631,11 @@ class E88QtControllerWindow(QMainWindow):
         self._cam_button_group.addButton(self.cam1_button)
         self._cam_button_group.addButton(self.cam2_button)
         self._selected_cam = 1
+        # (width, height) of the most recent source frame; used to look up intrinsics,
+        # which are keyed by camera and the resolution RTSP actually negotiated.
+        self._last_frame_size: Optional[Tuple[int, int]] = None
+        self._last_video_ts: Optional[float] = None
+        self._observed_fps: Optional[float] = None
         self.cam1_button.setChecked(True)
         self.cam1_button.clicked.connect(lambda: self._select_camera(1))
         self.cam2_button.clicked.connect(lambda: self._select_camera(2))
@@ -542,6 +764,7 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_flow_motion_model.addItem("Affine translation", "affine_translation")
         self.cfg_flow_motion_model.addItem("Affine full", "affine_full")
         self.cfg_flow_motion_model.addItem("Translation + rotation", "translation_rotation")
+        self.cfg_flow_motion_model.addItem("Derotation (experimental, needs calibrated f)", "derotation")
         idx = self.cfg_flow_motion_model.findData(str(cfg_defaults.flow_motion_model))
         if idx >= 0:
             self.cfg_flow_motion_model.setCurrentIndex(idx)
@@ -577,6 +800,15 @@ class E88QtControllerWindow(QMainWindow):
         self.cfg_ki_vy.setRange(0.0, 1.0)
         self.cfg_ki_vy.setValue(float(cfg_defaults.ki_vy))
         self.autopilot_cfg_form_right.addRow("Ki vy", self.cfg_ki_vy)
+
+        self.cfg_record_frames = QCheckBox()
+        self.cfg_record_frames.setChecked(True)
+        self.cfg_record_frames.setToolTip(
+            "Record raw camera frames alongside telemetry (~300 MB per 5 min).\n"
+            "Without frames the vision pipeline cannot be replayed offline, so every\n"
+            "estimator comparison has to be re-flown instead of re-run."
+        )
+        self.autopilot_cfg_form_right.addRow("Record frames", self.cfg_record_frames)
 
         self.cfg_deadband = QDoubleSpinBox()
         self.cfg_deadband.setRange(0.0, 100.0)
@@ -711,6 +943,14 @@ class E88QtControllerWindow(QMainWindow):
         reg_row.addWidget(self.ref_load_btn)
         self.visual_scale_form.addRow("Register", reg_row)
 
+        self.ref_pad_rect_btn = QPushButton("Set pad area")
+        self.ref_pad_rect_btn.setToolTip(
+            "Mark where the physical pad sits inside the reference image. Required for "
+            "correct metric scale; changing it clears the altitude calibration."
+        )
+        self.ref_pad_rect_btn.clicked.connect(self._set_reference_pad_rect)
+        self.visual_scale_form.addRow("", self.ref_pad_rect_btn)
+
         self.ref_calib_height_m = QDoubleSpinBox()
         self.ref_calib_height_m.setRange(0.01, 50.0)
         self.ref_calib_height_m.setDecimals(2)
@@ -803,6 +1043,18 @@ class E88QtControllerWindow(QMainWindow):
         self.diag_fallback_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("fallback", self.diag_fallback_label)
 
+        self.diag_flow_model_label = QLabel("-")
+        self.diag_flow_model_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("flow model", self.diag_flow_model_label)
+
+        self.diag_flow_rmse_label = QLabel("-")
+        self.diag_flow_rmse_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("flow rmse", self.diag_flow_rmse_label)
+
+        self.diag_omega_xyz_label = QLabel("-")
+        self.diag_omega_xyz_label.setTextFormat(Qt.PlainText)
+        self.diagnostics_form.addRow("omega xyz", self.diag_omega_xyz_label)
+
         self.diag_altitude_label = QLabel("-")
         self.diag_altitude_label.setTextFormat(Qt.PlainText)
         self.diagnostics_form.addRow("altitude", self.diag_altitude_label)
@@ -886,7 +1138,8 @@ class E88QtControllerWindow(QMainWindow):
         rid = str(getattr(r, "reference_id", ""))
         suffix = rid[-6:] if len(rid) >= 6 else rid
         calib = "calib" if (r.calibration_height_m is not None and r.calibration_ref_size_px is not None) else "no_calib"
-        return f"{prefix} {r.pad_type} {r.pad_width_m:.2f}x{r.pad_height_m:.2f}m {calib} ({suffix})"
+        pad = "pad_quad" if r.has_pad_quad else "NO_PAD_QUAD"
+        return f"{prefix} {r.pad_type} {r.pad_width_m:.2f}x{r.pad_height_m:.2f}m {calib} {pad} ({suffix})"
 
     def _selected_reference_id(self) -> Optional[str]:
         try:
@@ -897,6 +1150,54 @@ class E88QtControllerWindow(QMainWindow):
             return None if not s else s
         except Exception:
             return None
+
+    def _measured_intrinsics(self) -> Optional["CameraIntrinsics"]:
+        """Chessboard-measured intrinsics for the selected camera and current frame
+        size, if the operator has run run_intrinsics_calibration."""
+        size = self._last_frame_size
+        if size is None:
+            return None
+        try:
+            return load_intrinsics(
+                camera_id=f"cam{int(self._selected_cam)}",
+                image_w=int(size[0]),
+                image_h=int(size[1]),
+            )
+        except Exception:
+            return None
+
+    def _compute_focal_length_from_ref(self) -> Optional[float]:
+        """Focal length for the flow estimators, in full-resolution pixels.
+
+        A direct chessboard measurement beats the pad-derived estimate: the latter
+        inherits every error in the pad geometry (and, for an uncropped reference,
+        the photo/pad extent ratio). Fall back to the pad only when no intrinsic
+        calibration exists for this camera and resolution."""
+        intr = self._measured_intrinsics()
+        if intr is not None:
+            return float(intr.focal_length_px)
+
+        ref_id = self._selected_reference_id()
+        if ref_id is None:
+            return None
+        try:
+            record = ReferenceStore().load(ref_id)
+            if record is None:
+                return None
+            return compute_focal_length_px(
+                calibration_height_m=record.calibration_height_m,
+                calibration_ref_size_px=record.calibration_ref_size_px,
+                pad_width_m=record.pad_width_m,
+                pad_height_m=record.pad_height_m,
+            )
+        except Exception:
+            return None
+
+    def _principal_point_px(self) -> Optional[Tuple[float, float]]:
+        intr = self._measured_intrinsics()
+        if intr is None:
+            return None
+        return (float(intr.cx), float(intr.cy))
 
     def _reload_references(self, _checked: bool = False, *, select_id: Optional[str] = None) -> None:
         prev = self._selected_reference_id()
@@ -1001,6 +1302,25 @@ class E88QtControllerWindow(QMainWindow):
         self._create_reference_from_image(frame_bgr=img)
 
     def _create_reference_from_image(self, *, frame_bgr: np.ndarray) -> None:
+        dlg = PadRectDialog(frame_bgr, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        pad_quad_px = dlg.pad_corners_px()
+        if pad_quad_px is None:
+            resp = QMessageBox.warning(
+                self,
+                "Reference",
+                "No pad corners were marked.\n\n"
+                "Without them the detector measures the whole reference image instead of "
+                "the pad, so metric velocity and the derived focal length will be wrong "
+                "by the image/pad extent ratio. Only continue if this image is already "
+                "cropped tightly to the pad.\n\nRegister without pad corners?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+
         store = ReferenceStore()
         try:
             r = store.create(
@@ -1010,6 +1330,7 @@ class E88QtControllerWindow(QMainWindow):
                 reference_capture_height_m=float(self.ref_capture_height_m.value()),
                 markers_present=bool(self.ref_markers_present.isChecked()),
                 image_bgr=frame_bgr,
+                pad_quad_px=None if pad_quad_px is None else pad_quad_px.tolist(),
             )
         except Exception as e:
             QMessageBox.warning(self, "Reference", f"Failed to create reference: {type(e).__name__}: {e}")
@@ -1017,6 +1338,54 @@ class E88QtControllerWindow(QMainWindow):
 
         self.ref_status_label.setText(f"Created reference {r.reference_id}")
         self._reload_references(select_id=str(r.reference_id))
+
+    def _set_reference_pad_rect(self) -> None:
+        if self._autopilot_running or self._calibration_running:
+            return
+        ref_id = self._selected_reference_id()
+        if ref_id is None:
+            QMessageBox.warning(self, "Pad area", "Select a reference first")
+            return
+
+        store = ReferenceStore()
+        record = store.load(ref_id)
+        img = store.load_image_bgr(ref_id)
+        if record is None or img is None:
+            QMessageBox.warning(self, "Pad area", "Failed to load reference record/image")
+            return
+
+        if bool(record.markers_present):
+            QMessageBox.information(
+                self,
+                "Pad area",
+                "This reference uses marker detection, which measures the minimum-area "
+                "rectangle of the detected marker hull and ignores the pad area.\n\n"
+                "If the markers are inset from the pad edges, metric scale will stay "
+                "biased by the marker-margin ratio regardless of what you mark here.",
+            )
+
+        dlg = PadRectDialog(img, self)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        pad_quad_px = dlg.pad_corners_px()
+        if pad_quad_px is None:
+            QMessageBox.warning(self, "Pad area", "Four corners were not marked; nothing changed.")
+            return
+
+        had_calibration = record.calibration_ref_size_px is not None
+        try:
+            store.update_pad_quad(ref_id, pad_quad_px=pad_quad_px.tolist())
+        except Exception as e:
+            QMessageBox.warning(self, "Pad area", f"Failed to update: {type(e).__name__}: {e}")
+            return
+
+        w = float(np.linalg.norm(pad_quad_px[1] - pad_quad_px[0]))
+        h = float(np.linalg.norm(pad_quad_px[3] - pad_quad_px[0]))
+        msg = f"Pad area set: {w:.0f}x{h:.0f} px (4 corners)."
+        if had_calibration:
+            msg += " Altitude calibration was cleared - run 'Calibrate altitude' again."
+        self.ref_status_label.setText(msg)
+        self._reload_references(select_id=ref_id)
 
     def _calibrate_reference_altitude(self) -> None:
         if self._autopilot_running or self._calibration_running:
@@ -1186,13 +1555,28 @@ class E88QtControllerWindow(QMainWindow):
     def _tick_video(self) -> None:
         if self._autopilot_running or self._calibration_running:
             return
-        frame = self._drone.get_frame(timeout=0)
-        if frame is None:
+        item = self._drone.get_frame_with_timestamp(timeout=0)
+        if item is None:
             return
+        frame, ts = item
+
+        # Track the decoded camera rate so frame recordings get a container fps that
+        # matches the camera rather than the control loop.
+        if self._last_video_ts is not None and float(ts) > float(self._last_video_ts):
+            dt = float(ts) - float(self._last_video_ts)
+            if dt > 1e-6:
+                inst = 1.0 / dt
+                self._observed_fps = inst if self._observed_fps is None else (0.9 * self._observed_fps + 0.1 * inst)
+        self._last_video_ts = float(ts)
 
         self._show_frame(frame, rotate_90_cw=True)
 
     def _show_frame(self, frame_bgr: np.ndarray, *, rotate_90_cw: bool) -> None:
+        # Track the *unrotated* source size: intrinsics are keyed by the resolution
+        # the RTSP stream actually negotiated, and flow runs on this frame too.
+        h0, w0 = frame_bgr.shape[:2]
+        self._last_frame_size = (int(w0), int(h0))
+
         rgb_image = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         if rotate_90_cw:
             rgb_image = cv2.rotate(rgb_image, cv2.ROTATE_90_CLOCKWISE)
@@ -1224,6 +1608,8 @@ class E88QtControllerWindow(QMainWindow):
             flow_motion_model=str(self.cfg_flow_motion_model.currentData() or "affine_translation"),
             flow_tr_residual_thresh_px=float(self.cfg_flow_tr_residual_thresh_px.value()),
             flow_tr_min_points=int(self.cfg_flow_tr_min_points.value()),
+            flow_focal_length_px=float(self._compute_focal_length_from_ref() or 0.0),
+            flow_principal_point_px=self._principal_point_px(),
             kp_vx=float(self.cfg_kp_vx.value()),
             kp_vy=float(self.cfg_kp_vy.value()),
             ki_vx=float(self.cfg_ki_vx.value()),
@@ -1269,7 +1655,63 @@ class E88QtControllerWindow(QMainWindow):
             )
             return
 
+        if bool(record.markers_present) and record.has_pad_quad and bool(self.cfg_use_m_s_control.isChecked()):
+            resp = QMessageBox.warning(
+                self,
+                "Marker mode ignores the pad area",
+                "This reference uses marker detection, which measures the minimum-area "
+                "rectangle of the marker hull and ignores the pad corners you marked.\n\n"
+                "If the markers are inset from the pad edges, metric velocity (m/s "
+                "control) and the derived focal length are biased by the marker-margin "
+                "ratio.\n\nFly with m/s control anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+
+        if not record.has_pad_quad:
+            resp = QMessageBox.warning(
+                self,
+                "Reference has no pad rectangle",
+                "The selected Reference does not record where the pad sits within the "
+                "reference image, so the detector measures the whole image instead of "
+                "the pad.\n\n"
+                "Altitude is unaffected (it is a ratio), but metric velocity (m/s "
+                "control) and the derived focal length are scaled by the image/pad "
+                "extent ratio.\n\n"
+                "Use 'Set pad area' to fix this. Fly anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+
         cfg = self._build_cfg()
+
+        if str(cfg.flow_motion_model) == "derotation":
+            # The derotation model separates tilt from translation only through the
+            # quadratic (1+u'^2) radial term, so it is acutely sensitive to the focal
+            # length. f is currently derived from the reference-pad calibration, which
+            # measures the projected footprint of the whole (uncropped) reference image
+            # rather than the pad itself -- so f is wrong by the photo/pad extent ratio.
+            # Flying this before intrinsics are measured produced velocity estimates
+            # 4-6x worse than translation_rotation with *lower* fit residual.
+            resp = QMessageBox.warning(
+                self,
+                "Derotation model is experimental",
+                "The derotation motion model needs a calibrated focal length.\n\n"
+                "The current focal length comes from the reference-pad calibration, "
+                "which measures the whole reference image rather than the pad, so it "
+                "is known to be wrong. Recorded flights using this model showed much "
+                "worse velocity estimates than 'Translation + rotation'.\n\n"
+                "Fly it anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if resp != QMessageBox.Yes:
+                return
+
         duration = float(self.cfg_duration.value())
         duration_sec = None if duration <= 0.0 else duration
 
@@ -1283,6 +1725,8 @@ class E88QtControllerWindow(QMainWindow):
             initial_flow_sign_state=int(self.sign_flow_cb.checkState()),
             initial_control_sign_state=int(self.sign_control_cb.checkState()),
             initial_sign_notes=str(self.sign_notes_edit.text()),
+            record_frames=bool(self.cfg_record_frames.isChecked()),
+            camera_fps_hint=float(self._observed_fps or 20.0),
         )
         self._autopilot_worker.finished.connect(self._on_autopilot_finished)
         self._autopilot_worker.start()
@@ -1603,11 +2047,20 @@ class E88QtControllerWindow(QMainWindow):
                 self.diag_features_label.setText("-")
                 self.diag_inlier_label.setText("-")
                 self.diag_fallback_label.setText("-")
+                self.diag_flow_model_label.setText("-")
+                self.diag_flow_rmse_label.setText("-")
+                self.diag_omega_xyz_label.setText("-")
             else:
                 self.diag_quality_label.setText(f"{float(t.flow.quality):.2f}")
                 self.diag_features_label.setText(f"{int(t.flow.n_tracked)}/{int(t.flow.n_features)}")
                 self.diag_inlier_label.setText(f"{float(t.flow.inlier_ratio):.2f}")
                 self.diag_fallback_label.setText("1" if bool(t.flow.fallback_used) else "0")
+                self.diag_flow_model_label.setText(str(getattr(t.flow, "motion_model", "")))
+                self.diag_flow_rmse_label.setText(f"{float(getattr(t.flow, 'model_rmse_px', 0.0)):.2f} px")
+                ox = float(getattr(t.flow, "omega_x_rad", 0.0))
+                oy = float(getattr(t.flow, "omega_y_rad", 0.0))
+                oz = float(getattr(t.flow, "omega_z_rad", 0.0))
+                self.diag_omega_xyz_label.setText(f"{ox:+.4f} {oy:+.4f} {oz:+.4f}")
 
             if t.altitude_est_m is None:
                 self.diag_altitude_label.setText("-")
@@ -1693,9 +2146,14 @@ class E88QtControllerWindow(QMainWindow):
                 (0, 255, 0),
                 1,
             )
+            _flo = t.flow
+            _ox = float(getattr(_flo, "omega_x_rad", 0.0)) if _flo else 0.0
+            _oy = float(getattr(_flo, "omega_y_rad", 0.0)) if _flo else 0.0
+            _oz = float(getattr(_flo, "omega_z_rad", 0.0)) if _flo else 0.0
+            _mm = str(getattr(_flo, "motion_model", "")) if _flo else ""
             cv2.putText(
                 view,
-                f"kf_in vx {t.kf_input_vx_px_s:+.1f} vy {t.kf_input_vy_px_s:+.1f} px/s gated {int(bool(t.kf_gated))}",
+                f"{_mm} wx {_ox:+.4f} wy {_oy:+.4f} wz {_oz:+.4f}",
                 (10, 90),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,

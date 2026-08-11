@@ -36,9 +36,26 @@ class StabilizerConfig:
     min_quality: float = 0.15
     max_cmd: float = 0.9
 
+    # When the control loop outruns the camera, get_latest() returns the frame it
+    # already returned. Re-running optical flow on it produces dx ~ 0 with dt > 0 --
+    # a fabricated zero-velocity measurement. Skip those iterations and hold the
+    # last command instead.
+    skip_stale_frames: bool = True
+    # ...but only briefly. If the video feed freezes (RTSP drop, camera fault) the
+    # frame sequence stops advancing, and holding the last command would keep a
+    # nonzero correction latched indefinitely -- the E88 control thread re-transmits
+    # it at 33 Hz, so the aircraft would fly away. Past this bound, neutralize.
+    max_stale_frame_hold_sec: float = 0.5
+
     flow_motion_model: str = "translation_rotation"
     flow_tr_residual_thresh_px: float = 3.0
     flow_tr_min_points: int = 20
+    flow_focal_length_px: float = 0.0
+    # Optical centre in full-resolution pixels, from intrinsic calibration.
+    # None means "assume the image midpoint", which biases derotation.
+    flow_principal_point_px: Optional[Tuple[float, float]] = None
+    flow_derotation_residual_thresh_px: float = 3.0
+    flow_derotation_min_points: int = 20
 
     kp_vx: float = 0.003
     kp_vy: float = 0.003
@@ -123,9 +140,13 @@ class StabilizerTelemetry:
 
 
 class LatestFrameBuffer:
-    def __init__(self, drone: Drone, *, timeout_sec: float = 0.25) -> None:
+    def __init__(self, drone: Drone, *, timeout_sec: float = 0.25, frame_sink=None) -> None:
         self._drone = drone
         self._timeout_sec = float(timeout_sec)
+        # Optional FrameRecorder-like object. Tapped here rather than in the control
+        # loop so that frames the loop never consumes are still recorded -- otherwise
+        # a replay would not reproduce the drop pattern the estimator actually saw.
+        self._frame_sink = frame_sink
 
         self._lock = threading.Lock()
         self._latest: Optional[Tuple[np.ndarray, float, float, int]] = None
@@ -186,6 +207,15 @@ class LatestFrameBuffer:
             with self._lock:
                 self._seq += 1
                 self._latest = (frame, float(ts_f), float(t_received), int(self._seq))
+                seq_now = int(self._seq)
+
+            sink = self._frame_sink
+            if sink is not None:
+                try:
+                    sink.submit(frame, seq=seq_now, ts=float(ts_f), t_received=float(t_received))
+                except Exception:
+                    # Recording must never take down frame acquisition.
+                    pass
 
 
 class AutoStabilizer:
@@ -195,15 +225,23 @@ class AutoStabilizer:
         *,
         cfg: Optional[StabilizerConfig] = None,
         telemetry_sink: Optional[Callable[[StabilizerTelemetry], None]] = None,
+        frame_sink=None,
     ) -> None:
         self._drone = drone
         self._cfg = cfg or StabilizerConfig()
         self._telemetry_sink = telemetry_sink
+        # Optional FrameRecorder; consumed by LatestFrameBuffer so that every decoded
+        # frame is recorded, including ones the control loop never reads.
+        self._frame_sink = frame_sink
 
         self._flow = LucasKanadeDriftEstimator(
             motion_model=str(self._cfg.flow_motion_model),
             tr_residual_thresh_px=float(self._cfg.flow_tr_residual_thresh_px),
             tr_min_points=int(self._cfg.flow_tr_min_points),
+            focal_length_px=float(self._cfg.flow_focal_length_px),
+            principal_point_px=self._cfg.flow_principal_point_px,
+            derotation_residual_thresh_px=float(self._cfg.flow_derotation_residual_thresh_px),
+            derotation_min_points=int(self._cfg.flow_derotation_min_points),
         )
         self._kf = None
         if self._cfg.use_kalman:
@@ -335,7 +373,7 @@ class AutoStabilizer:
             self.activate()
 
         start = time.monotonic()
-        frame_buf = LatestFrameBuffer(self._drone)
+        frame_buf = LatestFrameBuffer(self._drone, frame_sink=self._frame_sink)
         frame_buf.start()
         last_used_frame_seq = -1
         try:
@@ -590,6 +628,12 @@ class AutoStabilizer:
 
             period = 1.0 / max(1.0, float(self._cfg.cmd_rate_hz))
 
+            # Last command actually issued, re-latched when a loop iteration finds no
+            # new frame. The E88 control thread keeps re-transmitting the latched RC
+            # state at 33 Hz, so holding is the correct no-op.
+            last_cmd_roll = 0.0
+            last_cmd_pitch = 0.0
+
             while True:
                 now = time.monotonic()
                 if self._last_loop_t is not None:
@@ -609,6 +653,8 @@ class AutoStabilizer:
                 item = frame_buf.get_latest()
                 if item is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
+                    last_cmd_roll = 0.0
+                    last_cmd_pitch = 0.0
                     t_cmd_sent = float(time.monotonic())
                     self._emit(
                         StabilizerTelemetry(
@@ -645,10 +691,75 @@ class AutoStabilizer:
                 t_flow_start = float(time.monotonic())
                 frame_age_ms = float(max(0.0, (t_flow_start - float(ts)) * 1000.0))
                 frame_stale_ms = float(max(0.0, (t_flow_start - float(t_frame_received)) * 1000.0))
+
+                if (not frame_is_new) and bool(self._cfg.skip_stale_frames):
+                    # The control loop outran the camera. Running LK on an identical
+                    # image yields dx ~ 0 with dt > 0, i.e. a fabricated zero-velocity
+                    # measurement that would be fed to the conditioner and Kalman and
+                    # pull the estimate toward zero. Hold the last command instead.
+                    #
+                    # Holding is only safe across the gap between consecutive frames.
+                    # If the feed has frozen, the sequence number stops advancing
+                    # forever and holding a nonzero correction would fly the aircraft
+                    # away, so fall back to neutral past max_stale_frame_hold_sec.
+                    hold_limit_sec = float(self._cfg.max_stale_frame_hold_sec)
+                    feed_lost = hold_limit_sec >= 0.0 and (frame_stale_ms * 1e-3) > hold_limit_sec
+                    if feed_lost:
+                        last_cmd_roll = 0.0
+                        last_cmd_pitch = 0.0
+                    self._drone.send_cmd(
+                        roll=float(last_cmd_roll),
+                        pitch=float(last_cmd_pitch),
+                        throttle=self._cfg.base_throttle,
+                    )
+                    t_cmd_sent = float(time.monotonic())
+                    self._emit(
+                        StabilizerTelemetry(
+                            phase="hold",
+                            frame_bgr=frame,
+                            timestamp=float(ts),
+                            pos_x_px=float(self._viz_x_px),
+                            pos_y_px=float(self._viz_y_px),
+                            flow=None,
+                            tracks=self._flow.last_tracks(),
+                            kalman=None,
+                            used_vx_px_s=0.0,
+                            used_vy_px_s=0.0,
+                            cmd_roll=float(last_cmd_roll),
+                            cmd_pitch=float(last_cmd_pitch),
+                            cmd_throttle=float(self._cfg.base_throttle),
+                            t_loop_start=float(t_loop_start),
+                            t_frame_received=float(t_frame_received),
+                            t_flow_start=float(t_flow_start),
+                            t_flow_end=float(t_flow_start),
+                            t_kf_end=float(t_flow_start),
+                            t_ctrl_end=float(t_flow_start),
+                            t_cmd_sent=float(t_cmd_sent),
+                            dt_flow_ms=0.0,
+                            dt_total_ms=float((t_cmd_sent - t_loop_start) * 1000.0),
+                            frame_age_ms=float(frame_age_ms),
+                            frame_stale_ms=float(frame_stale_ms),
+                            frame_seq=int(frame_seq),
+                            frame_is_new=False,
+                            frames_dropped=int(dropped),
+                            estimated_latency_ms=float(max(0.0, (t_cmd_sent - float(ts)) * 1000.0)),
+                            loop_rate_hz=float(self._loop_rate_hz_ema),
+                            frame_rate_hz=float(self._frame_rate_hz_ema),
+                            visual_scale_enabled=bool(self._cfg.enable_visual_scale),
+                            visual_scale_error=str(self._visual_scale_error),
+                        )
+                    )
+                    elapsed = time.monotonic() - now
+                    if elapsed < period:
+                        time.sleep(period - elapsed)
+                    continue
+
                 est = self._flow.update(frame, timestamp=float(time.monotonic()))
                 t_flow_end = float(time.monotonic())
                 if est is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
+                    last_cmd_roll = 0.0
+                    last_cmd_pitch = 0.0
                     t_cmd_sent = float(time.monotonic())
                     self._emit(
                         StabilizerTelemetry(
@@ -790,6 +901,8 @@ class AutoStabilizer:
                     cmd_roll = 0.0
                     cmd_pitch = 0.0
                     self._drone.send_cmd(roll=float(cmd_roll), pitch=float(cmd_pitch), throttle=self._cfg.base_throttle)
+                    last_cmd_roll = float(cmd_roll)
+                    last_cmd_pitch = float(cmd_pitch)
                     t_cmd_sent = float(time.monotonic())
                     self._emit(
                         StabilizerTelemetry(
@@ -851,6 +964,8 @@ class AutoStabilizer:
                     cmd_roll = float(out.roll) * float(cmd_scale)
                     cmd_pitch = float(out.pitch) * float(cmd_scale)
                     self._drone.send_cmd(roll=float(cmd_roll), pitch=float(cmd_pitch), throttle=self._cfg.base_throttle)
+                    last_cmd_roll = float(cmd_roll)
+                    last_cmd_pitch = float(cmd_pitch)
                     t_cmd_sent = float(time.monotonic())
 
                     self._emit(
