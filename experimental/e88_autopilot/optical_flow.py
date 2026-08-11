@@ -513,7 +513,7 @@ class LucasKanadeDriftEstimator:
 
         next_pts, status, _err = cv2.calcOpticalFlowPyrLK(self._prev_gray, gray, self._prev_pts, None, **self._lk_params)
         if next_pts is None or status is None:
-            fallback = self._fallback_phase_correlation(prev_gray=self._prev_gray, gray=gray, dt=float(dt))
+            fallback = self._maybe_phase_correlation(prev_gray=self._prev_gray, gray=gray, dt=float(dt))
             if fallback is not None:
                 dx_px, dy_px, quality = fallback
                 dx_px *= scale
@@ -600,17 +600,7 @@ class LucasKanadeDriftEstimator:
         max_frac = max(0.01, float(self._max_translation_frac))
         max_step_px = max_frac * float(min(gray.shape[0], gray.shape[1]))
         if abs(dx_px) > max_step_px or abs(dy_px) > max_step_px or inlier_ratio < float(self._min_inlier_ratio):
-            # Phase correlation estimates a pure image shift and cannot separate tilt
-            # from translation -- it reports rotational flow as ordinary, normal-quality
-            # translation. That is precisely the artifact the derotation model exists to
-            # remove, and inter-frame pitch or roll is a common reason the affine fit
-            # trips this gate in the first place. So under derotation, fail closed here
-            # rather than substituting an estimator that cannot answer the question.
-            fallback = (
-                None
-                if self._motion_model == "derotation"
-                else self._fallback_phase_correlation(prev_gray=self._prev_gray, gray=gray, dt=float(dt))
-            )
+            fallback = self._maybe_phase_correlation(prev_gray=self._prev_gray, gray=gray, dt=float(dt))
             if fallback is not None:
                 dx_px, dy_px, quality = fallback
                 dx_px *= scale
@@ -777,6 +767,21 @@ class LucasKanadeDriftEstimator:
             self._prev_pts = pts.astype(np.float32)
         self._prev_gray = gray
         self._frames_since_init = 0
+
+    def _maybe_phase_correlation(self, *, prev_gray, gray, dt: float):
+        """Phase-correlation fallback, suppressed under the derotation model.
+
+        Phase correlation estimates a pure image shift and cannot separate tilt from
+        translation -- it reports rotational flow as ordinary, normal-quality
+        translation, which is exactly the artifact derotation exists to remove.
+        Inter-frame pitch or roll is also a common reason tracking degrades enough to
+        reach a fallback in the first place, so the two must never be paired.
+
+        Every fallback path goes through here so the check cannot be missed on one of
+        them."""
+        if self._motion_model == "derotation":
+            return None
+        return self._fallback_phase_correlation(prev_gray=prev_gray, gray=gray, dt=float(dt))
 
     def _fallback_phase_correlation(
         self, *, prev_gray: np.ndarray, gray: np.ndarray, dt: float

@@ -756,6 +756,16 @@ class AutoStabilizer:
 
                 est = self._flow.update(frame, timestamp=float(time.monotonic()))
                 t_flow_end = float(time.monotonic())
+
+                # A zero-quality estimate is the estimator saying it could not measure
+                # this frame (e.g. a rejected derotation fit, where dx/dy still hold the
+                # affine translation that the model exists to remove). The controller
+                # gates on quality, but the Kalman update happens first and clamps
+                # quality to a small floor -- so without this the rejected measurement
+                # still enters the filter state and leaks into later commands.
+                if est is not None and float(est.quality) <= 0.0:
+                    est = None
+
                 if est is None:
                     self._drone.send_cmd(roll=0.0, pitch=0.0, throttle=self._cfg.base_throttle)
                     last_cmd_roll = 0.0

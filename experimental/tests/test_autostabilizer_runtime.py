@@ -3,6 +3,7 @@ import time
 import threading
 import unittest
 from pathlib import Path
+from dataclasses import replace
 from queue import Empty, Queue
 
 import numpy as np
@@ -246,6 +247,60 @@ class TestAutoStabilizerRuntime(unittest.TestCase):
         for t in after:
             self.assertAlmostEqual(float(t.cmd_roll), float(hold[idx].cmd_roll), places=9)
             self.assertAlmostEqual(float(t.cmd_pitch), float(hold[idx].cmd_pitch), places=9)
+
+    def test_zero_quality_estimates_never_reach_the_kalman(self) -> None:
+        """A zero-quality estimate means the estimator could not measure this frame --
+        e.g. a rejected derotation fit, whose dx/dy still hold the affine translation
+        the model exists to remove. The controller gates on quality, but the Kalman
+        update runs first and clamps quality to a small floor, so the measurement
+        would otherwise leak into the filter state and into later commands."""
+
+        class _ZeroQualityFlow(_PassthroughFlow):
+            def update(self, _frame_bgr, timestamp=None):
+                est = super().update(_frame_bgr, timestamp=timestamp)
+                if est is None:
+                    return None
+                return replace(est, quality=0.0)
+
+        class _RecordingKalman:
+            def __init__(self) -> None:
+                self.updates = []
+
+            def reset(self):
+                self.updates = []
+
+            def update_velocity(self, *, t, vx_px_s, vy_px_s, quality):
+                self.updates.append((float(vx_px_s), float(vy_px_s), float(quality)))
+                raise AssertionError("Kalman must not be updated with a zero-quality sample")
+
+        drone = _FakeDrone()
+        cfg = StabilizerConfig(
+            enable_takeoff=False,
+            cmd_rate_hz=200.0,
+            use_kalman=True,
+            enable_visual_scale=False,
+            min_quality=0.0,
+            settle_good_frames=0,
+            climb_duration_sec=0.0,
+        )
+
+        latest = []
+        s = AutoStabilizer(drone, cfg=cfg, telemetry_sink=latest.append)
+        s._flow = _ZeroQualityFlow(vx_px_s=50.0, vy_px_s=30.0)  # type: ignore[attr-defined]
+        kf = _RecordingKalman()
+        s._kf = kf  # type: ignore[attr-defined]
+
+        pusher = self._paced_pusher(drone, n=4, interval_sec=0.05)
+        s.activate()
+        pusher.start()
+        s.run(duration_sec=0.4)
+        pusher.join(timeout=1.0)
+
+        self.assertEqual(kf.updates, [])
+        # min_quality=0 would otherwise let the controller command on it immediately.
+        for roll, pitch, _throttle, _yaw in drone.sent:
+            self.assertEqual(float(roll), 0.0)
+            self.assertEqual(float(pitch), 0.0)
 
     def test_frozen_video_feed_neutralizes_instead_of_holding_forever(self) -> None:
         """Holding the last command is only safe across the gap between consecutive

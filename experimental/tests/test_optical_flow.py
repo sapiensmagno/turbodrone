@@ -523,6 +523,21 @@ class TestDerotationFocalLengthDownscale(unittest.TestCase):
         if out is not None:
             self.assertNotEqual(out.motion_model, "phase_corr")
 
+        # Tracking loss is a second route to the fallback and must be covered too.
+        with mock.patch.object(
+            LucasKanadeDriftEstimator, "_fallback_phase_correlation", return_value=(999.0, 0.0, 0.9)
+        ) as patched, mock.patch.object(cv2, "calcOpticalFlowPyrLK", return_value=(None, None, None)):
+            est_lost = LucasKanadeDriftEstimator(
+                motion_model="derotation",
+                focal_length_px=200.0,
+                downscale=1.0,
+                reinit_every_n_frames=0,
+                min_tracked_features=5,
+            )
+            est_lost.update(frame, timestamp=0.0)
+            est_lost.update(shifted, timestamp=0.05)
+            patched.assert_not_called()
+
         # The same setup under affine_translation *does* use the fallback, confirming
         # the test actually reaches that branch.
         with mock.patch.object(

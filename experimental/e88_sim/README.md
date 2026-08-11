@@ -294,3 +294,40 @@ behaviour, not a failure** — this is a velocity-hold loop with no position
 feedback, so it can null velocity but cannot return to a point. Visible
 high-frequency jitter is the symptom to abort on, because that is what too much
 gain for the latency looks like.
+
+---
+
+## Known gaps in this simulator
+
+Found by review after the numbers above were produced. They do not overturn the
+direction of the gain result — every mechanism here would make an over-hot loop
+look *better* behaved, not worse — but they do mean the specific knee location
+and corner counts should be treated as provisional until fixed.
+
+1. **Scenarios hardcode `kalman_sigma_v = 50.0`.** That is the `StabilizerConfig`
+   default, but the Qt app loads `calibration.json`, which now supplies `1.109`.
+   Less smoothing means a noisier velocity estimate reaching the controller, so
+   the real knee is likely *lower* than measured, not higher. The sweep should
+   be re-run at the flown value, and the CLI needs a sigma override.
+2. **`low_texture` does not degrade flow quality.** `AnalyticFlowSensor` never
+   consults `GroundParams`, so it emits the same quality and feature counts as
+   nominal. That scenario can report PASS without exercising feature loss or
+   quality gating at all.
+3. **`lossy_link` tear probability is unused** by `run_fast`, so the advertised
+   tearing stress is absent from the non-vision verdict.
+4. **`run_fast` does not log state during stale-frame holds**, leaving a hole in
+   the recorded trajectory. A freeze lasting to the end truncates the scored
+   duration, so RMS and FFT metrics underweight exactly the behaviour under test.
+5. **Metrics can return PASS on NaN.** Only `radius_all` is checked for
+   finiteness; an isolated NaN in the velocity arrays survives `np.nanmax` and
+   makes every threshold comparison false.
+6. **Latency jitter can reorder frames.** Sorting by `deliver_at` lets a
+   later-captured frame arrive first, so LK sees pose go backwards in time --
+   the opposite of the in-order guarantee the code claims, and most likely in
+   the high-latency scenario.
+7. **Matching noise scales with `dt`**, which makes the resulting velocity noise
+   constant across frame intervals instead of amplifying on short ones. This
+   flattens exactly the effect the lossy and timing scenarios exist to probe.
+8. **`run_fast` builds the full 4000x4000 ground texture** on every run and seed
+   even though the analytic sensor never reads a pixel, which dominates the
+   runtime of a path documented as ~40 ms.
