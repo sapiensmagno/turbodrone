@@ -26,6 +26,9 @@ class FlowEstimate:
     omega_rad: float = 0.0
     omega_rad_s: float = 0.0
     model_rmse_px: float = 0.0
+    omega_x_rad: float = 0.0
+    omega_y_rad: float = 0.0
+    omega_z_rad: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,197 @@ class TranslationRotationFit:
     rmse_px: float
     n_used: int
     inlier_ratio: float
+
+
+@dataclass(frozen=True)
+class DerotationFit:
+    vx_px: float
+    vy_px: float
+    omega_x_rad: float
+    omega_y_rad: float
+    omega_z_rad: float
+    rmse_px: float
+    n_used: int
+    inlier_ratio: float
+
+
+class DerotationMotionModel:
+    def __init__(
+        self,
+        *,
+        focal_length_px: float,
+        residual_thresh_px: float = 3.0,
+        min_points: int = 20,
+        max_condition_number: float = 5000.0,
+    ) -> None:
+        self._f = float(focal_length_px)
+        self._residual_thresh_px = float(residual_thresh_px)
+        self._min_points = int(min_points)
+        # Measured condition numbers for this design matrix, 200 features, at the
+        # real downscaled geometry (320x240, f=183):
+        #     full-frame support            ~1300
+        #     features in central 50%       ~4150
+        #     features in central 35%       ~8700
+        #     features in central 25%      ~18400
+        #     full frame but f 2x too large ~7700
+        # The default admits full-frame and moderately concentrated support while
+        # rejecting the regimes where translation and tilt stop being separable.
+        # <= 0 disables the check (for tests that probe the raw algebra).
+        self._max_condition_number = float(max_condition_number)
+
+    @property
+    def focal_length_px(self) -> float:
+        return self._f
+
+    def estimate(
+        self,
+        *,
+        prev_xy: np.ndarray,
+        next_xy: np.ndarray,
+        inliers: Optional[np.ndarray],
+        cx: float,
+        cy: float,
+    ) -> Optional[DerotationFit]:
+        if prev_xy.ndim != 2 or prev_xy.shape[1] != 2:
+            return None
+        if next_xy.ndim != 2 or next_xy.shape[1] != 2:
+            return None
+        if prev_xy.shape[0] != next_xy.shape[0]:
+            return None
+        if prev_xy.shape[0] < self._min_points:
+            return None
+
+        if inliers is None:
+            mask = np.ones((prev_xy.shape[0],), dtype=np.bool_)
+        else:
+            mask = inliers.reshape(-1).astype(np.bool_)
+
+        prev = prev_xy[mask].astype(np.float64)
+        nxt = next_xy[mask].astype(np.float64)
+        if prev.shape[0] < self._min_points:
+            return None
+
+        return self._solve(prev, nxt, cx, cy, prev_xy.shape[0])
+
+    def _fit_pass(
+        self, prev: np.ndarray, nxt: np.ndarray, cx: float, cy: float
+    ) -> Optional[Tuple[Tuple[float, float, float, float, float], np.ndarray]]:
+        """Solve one least-squares pass. Returns ((Vx, Vy, wx, wy, wz), residuals)
+        or None if the system is too ill-conditioned to trust.
+
+        Translation and tilt are separated only by the quadratic radial term
+        (1 + u'^2). When the tracked features sit in a small patch or along a line,
+        the Vx and wy columns become near-collinear and lstsq still returns an
+        arbitrary -- often enormous, or merely plausible but sign-flipped --
+        translation with a tiny residual. RMSE cannot detect that, so conditioning
+        has to be checked on every pass, including the post-residual refit: residual
+        filtering can itself strip the peripheral tracks that were holding the system
+        together."""
+        f = self._f
+        d = nxt - prev
+        u = (prev[:, 0] - cx) / f
+        v = (prev[:, 1] - cy) / f
+        n = prev.shape[0]
+
+        a = np.zeros((2 * n, 5), dtype=np.float64)
+        b = np.zeros((2 * n,), dtype=np.float64)
+
+        # flow_u = Vx + (u'v')wx - (1+u'^2)*f*wy + v'*f*wz
+        # flow_v = Vy + (1+v'^2)*f*wx - (u'v')*f*wy - u'*f*wz
+        # col 0: Vx, col 1: Vy, col 2: wx, col 3: wy, col 4: wz
+        a[0::2, 0] = 1.0
+        a[0::2, 2] = u * v * f
+        a[0::2, 3] = -(1.0 + u ** 2) * f
+        a[0::2, 4] = v * f
+        b[0::2] = d[:, 0]
+
+        a[1::2, 1] = 1.0
+        a[1::2, 2] = (1.0 + v ** 2) * f
+        a[1::2, 3] = -(u * v) * f
+        a[1::2, 4] = -u * f
+        b[1::2] = d[:, 1]
+
+        if self._max_condition_number > 0.0:
+            try:
+                cond = float(np.linalg.cond(a))
+            except np.linalg.LinAlgError:
+                return None
+            if not np.isfinite(cond) or cond > self._max_condition_number:
+                return None
+
+        try:
+            sol, *_ = np.linalg.lstsq(a, b, rcond=None)
+        except np.linalg.LinAlgError:
+            return None
+        if not np.all(np.isfinite(sol)):
+            return None
+
+        vx, vy, wx, wy, wz = (float(s) for s in sol)
+        pred_u = vx + (u * v * f) * wx - ((1.0 + u ** 2) * f) * wy + (v * f) * wz
+        pred_v = vy + ((1.0 + v ** 2) * f) * wx - (u * v * f) * wy - (u * f) * wz
+        residuals = np.sqrt((d[:, 0] - pred_u) ** 2 + (d[:, 1] - pred_v) ** 2)
+        return (vx, vy, wx, wy, wz), residuals
+
+    def _solve(
+        self,
+        prev: np.ndarray,
+        nxt: np.ndarray,
+        cx: float,
+        cy: float,
+        n_total: int,
+    ) -> Optional[DerotationFit]:
+        f = self._f
+        if f <= 1e-6:
+            return None
+
+        first = self._fit_pass(prev, nxt, cx, cy)
+        if first is None:
+            return None
+        params, residuals = first
+        n = prev.shape[0]
+
+        used = np.ones((n,), dtype=np.bool_)
+        if self._residual_thresh_px > 0.0:
+            used = residuals <= float(self._residual_thresh_px)
+            n_used = int(np.count_nonzero(used))
+            if n_used < self._min_points:
+                # Too few points survived the residual gate to trust any fit. The
+                # first-pass solution was computed over points we have just judged
+                # inconsistent with the model, so returning it would hand the
+                # controller an unvalidated velocity (and, with zero survivors, a
+                # NaN RMSE that no downstream check would catch).
+                return None
+            if n_used < n:
+                second = self._fit_pass(prev[used], nxt[used], cx, cy)
+                if second is None:
+                    # The surviving points alone are ill-conditioned.
+                    return None
+                params, r2 = second
+                vx, vy, wx, wy, wz = params
+                return DerotationFit(
+                    vx_px=float(vx),
+                    vy_px=float(vy),
+                    omega_x_rad=float(wx),
+                    omega_y_rad=float(wy),
+                    omega_z_rad=float(wz),
+                    rmse_px=float(np.sqrt(float(np.mean(r2 ** 2)))),
+                    n_used=int(n_used),
+                    inlier_ratio=float(n_used / max(1, n_total)),
+                )
+
+        n_used = int(np.count_nonzero(used))
+        vx, vy, wx, wy, wz = params
+        rmse = float(np.sqrt(float(np.mean(residuals[used] ** 2))))
+        return DerotationFit(
+            vx_px=float(vx),
+            vy_px=float(vy),
+            omega_x_rad=float(wx),
+            omega_y_rad=float(wy),
+            omega_z_rad=float(wz),
+            rmse_px=float(rmse),
+            n_used=int(n_used),
+            inlier_ratio=float(n_used / max(1, n_total)),
+        )
 
 
 class TranslationRotationMotionModel:
@@ -170,6 +364,10 @@ class LucasKanadeDriftEstimator:
         motion_model: str = "affine_translation",
         tr_residual_thresh_px: float = 3.0,
         tr_min_points: int = 20,
+        focal_length_px: float = 0.0,
+        principal_point_px: Optional[Tuple[float, float]] = None,
+        derotation_residual_thresh_px: float = 3.0,
+        derotation_min_points: int = 20,
     ) -> None:
         self._feature_params = dict(
             maxCorners=int(max_corners),
@@ -198,6 +396,41 @@ class LucasKanadeDriftEstimator:
             residual_thresh_px=float(tr_residual_thresh_px),
             min_points=int(tr_min_points),
         )
+        # focal_length_px is supplied in full-resolution pixels, but the derotation
+        # solver receives point coordinates and cx/cy from the downscaled tracking
+        # image. Normalized coordinates u' = (x - cx) / f are only consistent if f
+        # lives in the same frame, so scale it by downscale. Getting this wrong
+        # reparameterizes tilt into a large spurious translation *with zero residual*,
+        # which means model_rmse_px cannot detect the error.
+        self._focal_length_px = float(focal_length_px)
+        self._focal_length_px_scaled = float(focal_length_px) * self._downscale
+        # Optical centre in full-resolution pixels, scaled into the downscaled
+        # tracking frame like f. Assuming the exact image midpoint makes pure
+        # rotation look like translation: a yaw of omega_z leaks roughly
+        # (cy_err * omega_z, -cx_err * omega_z) straight into the controller.
+        # None falls back to the image midpoint.
+        self._principal_point_px_scaled: Optional[Tuple[float, float]] = (
+            None
+            if principal_point_px is None
+            else (float(principal_point_px[0]) * self._downscale, float(principal_point_px[1]) * self._downscale)
+        )
+        self._derot_model: Optional[DerotationMotionModel] = None
+        if self._motion_model == "derotation":
+            if self._focal_length_px_scaled <= 1e-6:
+                # Previously this silently left _derot_model as None and ran the
+                # affine-translation model instead, so a run configured for
+                # derotation quietly used a different algorithm and reported
+                # motion_model="affine_translation".
+                raise ValueError(
+                    "motion_model='derotation' requires a positive focal_length_px "
+                    f"(got {focal_length_px!r}). Run the intrinsic calibration "
+                    "(e88_autopilot.run_intrinsics_calibration) or pass --focal-length-px."
+                )
+            self._derot_model = DerotationMotionModel(
+                focal_length_px=float(self._focal_length_px_scaled),
+                residual_thresh_px=float(derotation_residual_thresh_px),
+                min_points=int(derotation_min_points),
+            )
 
         self._prev_gray: Optional[np.ndarray] = None
         self._prev_pts: Optional[np.ndarray] = None
@@ -367,7 +600,17 @@ class LucasKanadeDriftEstimator:
         max_frac = max(0.01, float(self._max_translation_frac))
         max_step_px = max_frac * float(min(gray.shape[0], gray.shape[1]))
         if abs(dx_px) > max_step_px or abs(dy_px) > max_step_px or inlier_ratio < float(self._min_inlier_ratio):
-            fallback = self._fallback_phase_correlation(prev_gray=self._prev_gray, gray=gray, dt=float(dt))
+            # Phase correlation estimates a pure image shift and cannot separate tilt
+            # from translation -- it reports rotational flow as ordinary, normal-quality
+            # translation. That is precisely the artifact the derotation model exists to
+            # remove, and inter-frame pitch or roll is a common reason the affine fit
+            # trips this gate in the first place. So under derotation, fail closed here
+            # rather than substituting an estimator that cannot answer the question.
+            fallback = (
+                None
+                if self._motion_model == "derotation"
+                else self._fallback_phase_correlation(prev_gray=self._prev_gray, gray=gray, dt=float(dt))
+            )
             if fallback is not None:
                 dx_px, dy_px, quality = fallback
                 dx_px *= scale
@@ -400,6 +643,9 @@ class LucasKanadeDriftEstimator:
         raw_dy_px = float(dy_px) * scale
         omega_rad = 0.0
         omega_rad_s = 0.0
+        omega_x_rad = 0.0
+        omega_y_rad = 0.0
+        omega_z_rad = 0.0
         model_rmse_px = float(self._rmse_affine_px(prev_xy=prev_good, next_xy=next_good, m=affine_m, inliers=inliers)) * scale
         motion_model = str("affine_full" if self._motion_model == "affine_full" else "affine_translation")
 
@@ -417,6 +663,61 @@ class LucasKanadeDriftEstimator:
                 model_rmse_px = float(fit.rmse_px) * scale
                 motion_model = str("translation_rotation")
 
+        derotation_rejected = False
+        if self._motion_model == "derotation" and self._derot_model is not None:
+            derotation_rejected = n_tracked < 4
+        if self._motion_model == "derotation" and self._derot_model is not None and n_tracked >= 4:
+            if self._principal_point_px_scaled is None:
+                img_cx = float(gray.shape[1]) * 0.5
+                img_cy = float(gray.shape[0]) * 0.5
+            else:
+                img_cx, img_cy = self._principal_point_px_scaled
+            derot_fit = self._derot_model.estimate(
+                prev_xy=prev_good.reshape(-1, 2).astype(np.float32),
+                next_xy=next_good.reshape(-1, 2).astype(np.float32),
+                inliers=inliers,
+                cx=img_cx,
+                cy=img_cy,
+            )
+            # The max_step_px / min_inlier_ratio gates above were applied to the
+            # affine translation, not to this fit. Derotation solves an
+            # ill-conditioned system, so it can invent a huge translation on a frame
+            # whose affine fit was excellent -- and would otherwise inherit that
+            # affine fit's near-1.0 quality. Validate it on its own terms.
+            if derot_fit is not None:
+                derot_dx = float(derot_fit.vx_px)
+                derot_dy = float(derot_fit.vy_px)
+                if (
+                    not np.isfinite(derot_dx)
+                    or not np.isfinite(derot_dy)
+                    or abs(derot_dx) > max_step_px
+                    or abs(derot_dy) > max_step_px
+                    or float(derot_fit.inlier_ratio) < float(self._min_inlier_ratio)
+                ):
+                    derot_fit = None
+
+            if derot_fit is not None:
+                dx_px = float(derot_fit.vx_px)
+                dy_px = float(derot_fit.vy_px)
+                # Report the support this fit actually had, not the affine fit's.
+                inlier_ratio = float(derot_fit.inlier_ratio)
+                omega_x_rad = float(derot_fit.omega_x_rad)
+                omega_y_rad = float(derot_fit.omega_y_rad)
+                omega_z_rad = float(derot_fit.omega_z_rad)
+                omega_rad = float(omega_z_rad)
+                omega_rad_s = float(omega_rad / float(dt))
+                model_rmse_px = float(derot_fit.rmse_px) * scale
+                motion_model = str("derotation")
+            else:
+                # Fail closed. dx_px/dy_px still hold the affine translation, which
+                # for a pure camera tilt is exactly the spurious translation
+                # derotation exists to remove -- passing it through with a healthy
+                # quality score would defeat the point of selecting this model.
+                derotation_rejected = True
+
+        if derotation_rejected:
+            motion_model = str("derotation_rejected")
+
         dx_px *= scale
         dy_px *= scale
         prev_xy = prev_good.reshape(-1, 2).astype(np.float32) * scale
@@ -428,6 +729,10 @@ class LucasKanadeDriftEstimator:
 
         tracked_ratio = (n_tracked / max(1, n_features))
         quality = float(max(0.0, min(1.0, tracked_ratio * inlier_ratio)))
+        if derotation_rejected:
+            # Zero quality gates the sample out of the controller (which returns None
+            # below min_quality) while still emitting it for diagnostics.
+            quality = 0.0
 
         self._prev_gray = gray
         self._prev_pts = next_good.reshape(-1, 1, 2)
@@ -459,6 +764,9 @@ class LucasKanadeDriftEstimator:
             omega_rad=float(omega_rad),
             omega_rad_s=float(omega_rad_s),
             model_rmse_px=float(model_rmse_px),
+            omega_x_rad=float(omega_x_rad),
+            omega_y_rad=float(omega_y_rad),
+            omega_z_rad=float(omega_z_rad),
         )
 
     def _initialize(self, gray: np.ndarray) -> None:
