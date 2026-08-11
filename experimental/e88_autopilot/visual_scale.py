@@ -26,6 +26,26 @@ class VisualScaleEstimate:
     detection: ReferenceDetectionResult
 
 
+def compute_focal_length_px(
+    *,
+    calibration_height_m: Optional[float],
+    calibration_ref_size_px: Optional[float],
+    pad_width_m: float,
+    pad_height_m: float,
+) -> Optional[float]:
+    if calibration_height_m is None or calibration_ref_size_px is None:
+        return None
+    h = float(calibration_height_m)
+    s_px = float(calibration_ref_size_px)
+    real_size_m = 0.5 * (float(pad_width_m) + float(pad_height_m))
+    if h <= 1e-6 or s_px <= 1e-6 or real_size_m <= 1e-6:
+        return None
+    f = (s_px * h) / real_size_m
+    if not np.isfinite(f) or f <= 0.0:
+        return None
+    return float(f)
+
+
 def compute_m_per_px(*, pad_width_m: float, pad_height_m: float, ref_width_px: float, ref_height_px: float) -> tuple[Optional[float], Optional[float]]:
     wpx = float(ref_width_px)
     hpx = float(ref_height_px)
@@ -132,9 +152,23 @@ class VisualScaleEstimator:
     ) -> None:
         self._record = record
         method = "markers" if bool(record.markers_present) else str(detection_method)
+        ref_h, ref_w = reference_image_bgr.shape[:2]
+
+        # Known limitation: marker mode measures the minimum-area rectangle of the
+        # detected marker hull and ignores pad_quad_px entirely. If the markers are
+        # inset from the pad edges, metric scale and the derived focal length stay
+        # biased by the marker-margin ratio even after the pad area is marked.
+        # Surfaced rather than silently wrong; the fix is to project the stored pad
+        # quad through the marker correspondences.
+        self.pad_quad_ignored_by_markers = bool(record.markers_present) and bool(record.has_pad_quad)
         self._detector = ReferenceDetector(
             reference_bgr=reference_image_bgr,
             use_markers=bool(record.markers_present),
+            pad_corners_px=(
+                record.pad_corners_px(image_w=int(ref_w), image_h=int(ref_h))
+                if record.has_pad_quad
+                else None
+            ),
             method=str(method),
         )
 

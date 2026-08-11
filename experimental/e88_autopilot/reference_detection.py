@@ -28,6 +28,7 @@ class ReferenceDetector:
         *,
         reference_bgr: np.ndarray,
         use_markers: bool,
+        pad_corners_px: Optional[np.ndarray] = None,
         method: str = "auto",
         min_matches: int = 30,
         min_inliers: int = 20,
@@ -66,6 +67,27 @@ class ReferenceDetector:
         self._ref_gray = cv2.cvtColor(reference_bgr, cv2.COLOR_BGR2GRAY)
         self._ref_h, self._ref_w = self._ref_gray.shape[:2]
 
+        # Corners of the *physical pad* within the reference image, ordered
+        # top-left, top-right, bottom-right, bottom-left. These are what the
+        # homography projects into the frame, so that ref_size_px measures the pad
+        # -- the object pad_width_m/pad_height_m actually describe. Defaulting to the
+        # full image extent preserves legacy behaviour for records registered before
+        # pad_quad_px existed, but that measurement is not metrically meaningful
+        # unless the reference image happens to be cropped to the pad.
+        if pad_corners_px is None:
+            self._pad_corners = np.float32(
+                [
+                    [0.0, 0.0],
+                    [float(self._ref_w - 1), 0.0],
+                    [float(self._ref_w - 1), float(self._ref_h - 1)],
+                    [0.0, float(self._ref_h - 1)],
+                ]
+            )
+            self._pad_corners_are_full_image = True
+        else:
+            self._pad_corners = np.asarray(pad_corners_px, dtype=np.float32).reshape(4, 2)
+            self._pad_corners_are_full_image = False
+
         self._orb = cv2.ORB_create(nfeatures=1200)
         self._bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
@@ -73,7 +95,15 @@ class ReferenceDetector:
 
     @property
     def reference_size_px(self) -> float:
-        return float(0.5 * (float(self._ref_w) + float(self._ref_h)))
+        w = float(np.linalg.norm(self._pad_corners[1] - self._pad_corners[0]))
+        h = float(np.linalg.norm(self._pad_corners[3] - self._pad_corners[0]))
+        return float(0.5 * (w + h))
+
+    @property
+    def pad_corners_are_full_image(self) -> bool:
+        """True when no pad rectangle was supplied, so ref_size_px measures the whole
+        reference image rather than the pad."""
+        return bool(self._pad_corners_are_full_image)
 
     def detect(self, frame_bgr: np.ndarray) -> ReferenceDetectionResult:
         m = self._method
@@ -350,9 +380,7 @@ class ReferenceDetector:
                 reproj_error_px=0.0,
             )
 
-        corners = np.float32([[0, 0], [self._ref_w - 1, 0], [self._ref_w - 1, self._ref_h - 1], [0, self._ref_h - 1]]).reshape(
-            -1, 1, 2
-        )
+        corners = self._pad_corners.reshape(-1, 1, 2)
         proj = cv2.perspectiveTransform(corners, h).reshape(4, 2).astype(np.float32)
 
         if not _quad_is_valid(proj, frame_shape=gray.shape[:2]):
